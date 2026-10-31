@@ -12,7 +12,7 @@ final class MemoryPageCache: NSObject, NSCacheDelegate, @unchecked Sendable {
     /// The cache every paginator uses unless it is given another.
     static let shared = MemoryPageCache(costLimit: 20 * 1024 * 1024)
 
-    private let cache = NSCache<NSString, AnyObject>()
+    private let cache: NSCache<NSString, AnyObject>
     private let lock = NSLock()
     /// feedID -> key -> identity of the entry currently stored under that key.
     /// NSCache cannot list its keys. The identity lets the eviction callback tell
@@ -23,7 +23,9 @@ final class MemoryPageCache: NSObject, NSCacheDelegate, @unchecked Sendable {
     /// - Parameters:
     ///   - costLimit: The most bytes of page content to hold.
     ///   - countLimit: The most pages to hold.
-    init(costLimit: Int, countLimit: Int = 200) {
+    ///   - cache: Where entries live. Tests pass a subclass that a memory warning can't empty.
+    init(costLimit: Int, countLimit: Int = 200, cache: NSCache<NSString, AnyObject> = NSCache()) {
+        self.cache = cache
         super.init()
         cache.totalCostLimit = costLimit
         cache.countLimit = countLimit

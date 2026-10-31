@@ -8,7 +8,7 @@ private struct SearchToken: PageToken {
     let query: String
 }
 
-@Suite struct ModelsTests {
+@Suite(.watchdog) struct ModelsTests {
     @Test func indexTokenOffsetIsZeroBased() {
         #expect(IndexToken(page: 3, size: 20).offset == 40)
         #expect(IndexToken.first(size: 20).offset == 0)

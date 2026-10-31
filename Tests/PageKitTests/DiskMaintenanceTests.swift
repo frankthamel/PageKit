@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import PageKit
 
-final class DiskMaintenanceTests {
+@Suite(.watchdog) final class DiskMaintenanceTests {
     private let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("PageKitMaintenanceTests-\(UUID().uuidString)", isDirectory: true)
     private let now = Date(timeIntervalSince1970: 10_000_000)

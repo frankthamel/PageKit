@@ -3,7 +3,7 @@ import Foundation
 import Testing
 @testable import PageKit
 
-final class DiskPageStoreTests {
+@Suite(.watchdog) final class DiskPageStoreTests {
     private typealias TestPage = Page<TestItem, CursorToken>
 
     private let root: URL
@@ -142,6 +142,27 @@ final class DiskPageStoreTests {
         let nameA = DiskPageStore.folderName(for: a)
         #expect(nameA.utf8.count <= 200)
         #expect(nameA != DiskPageStore.folderName(for: b))
+    }
+
+    @Test func pageFromAnotherSchemaVersionDeletesTheFeed() async {
+        let store = makeStore()
+        await store.saveManifest(makeManifest(tokens: [token("a")]), feedID: "f")
+        await store.save(makePage(), feedID: "f", token: token("a"), schemaVersion: 1)
+
+        let page: TestPage? = await store.page(feedID: "f", token: token("a"), schemaVersion: 2)
+
+        #expect(page == nil)
+        #expect(await store.manifest(feedID: "f", as: CursorToken.self, schemaVersion: 1) == nil)
+    }
+
+    @Test func aFailedWriteReportsNoBytesAndDoesNotThrow() async throws {
+        // A file sitting where the root belongs makes every write fail.
+        try Data().write(to: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let bytes = await makeStore().save(makePage(), feedID: "f", token: token("a"), schemaVersion: 1)
+
+        #expect(bytes == 0)
     }
 
     @Test func dotOnlyFeedNamesCannotEscapeTheRoot() {

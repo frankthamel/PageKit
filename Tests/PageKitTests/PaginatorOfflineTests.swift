@@ -15,7 +15,7 @@ private actor Outage {
     }
 }
 
-@Suite struct PaginatorOfflineTests {
+@Suite(.watchdog) struct PaginatorOfflineTests {
     private let offline = URLError(.notConnectedToInternet)
     private let connectivity = FakeConnectivity()
     private let first = IndexToken.first(size: 2)

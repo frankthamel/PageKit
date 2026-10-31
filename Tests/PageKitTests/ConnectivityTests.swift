@@ -1,7 +1,7 @@
 import Testing
 @testable import PageKit
 
-@Suite struct ConnectivityTests {
+@Suite(.watchdog) struct ConnectivityTests {
     @Test func statusEquality() {
         #expect(ConnectivityStatus.online == ConnectivityStatus(isOnline: true))
         #expect(ConnectivityStatus.online.isExpensive == false)

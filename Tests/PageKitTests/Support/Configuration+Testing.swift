@@ -23,7 +23,7 @@ extension PaginatorEnvironment {
     /// An isolated environment: its own caches, faked connectivity and an instant sleep
     /// that still honours cancellation, as `Task.sleep` does.
     static func testing(
-        memory: MemoryPageCache = MemoryPageCache(costLimit: 1_000_000),
+        memory: MemoryPageCache = .pinned(),
         connectivity: any ConnectivityMonitoring = FakeConnectivity(),
         sleep: @escaping Sleep = { _ in try Task.checkCancellation() },
         now: @escaping @Sendable () -> Date = Date.init

@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import PageKit
 
-@Suite struct URLSessionPageSourceTests {
+@Suite(.watchdog) struct URLSessionPageSourceTests {
     private struct ArticlesResponse: Decodable, Sendable {
         let data: [TestItem]
         let next: String?

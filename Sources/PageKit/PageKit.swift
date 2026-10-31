@@ -62,16 +62,20 @@ public enum PageKit {
 
     /// Starts maintenance in the background, a few seconds after the first feed opens.
     /// Only the first call per launch does anything; later calls return `nil`.
+    ///
+    /// `.background` can wait for as long as the device is busy, which suits maintenance.
+    /// It would not suit a test waiting on the task, so a test passes its own `priority`.
     /// - Returns: The task that was started, so tests can wait for it.
     @discardableResult
     static func scheduleMaintenanceOnce(
         gate: OnceFlag = maintenanceGate,
+        priority: TaskPriority = .background,
         delayNanoseconds: UInt64 = maintenanceDelay,
         sleep: @escaping @Sendable (UInt64) async -> Void = { try? await Task.sleep(nanoseconds: $0) },
         perform: @escaping @Sendable () async -> Void = { await performMaintenance() }
     ) -> Task<Void, Never>? {
         guard gate.claim() else { return nil }
-        return Task(priority: .background) {
+        return Task(priority: priority) {
             await sleep(delayNanoseconds)
             await perform()
         }

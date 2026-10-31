@@ -7,7 +7,7 @@ private final class Clock: @unchecked Sendable {
     var now = Date(timeIntervalSince1970: 1_000_000)
 }
 
-@Suite struct PaginatorEditTests {
+@Suite(.watchdog) struct PaginatorEditTests {
     private let environment = PaginatorEnvironment.testing()
     private let first = IndexToken.first(size: 2)
     private var second: IndexToken { first.next }
@@ -66,7 +66,7 @@ private final class Clock: @unchecked Sendable {
     /// `environment` as a new launch finds it: the same disk, with nothing in memory.
     private var relaunchEnvironment: PaginatorEnvironment {
         PaginatorEnvironment(
-            memory: MemoryPageCache(costLimit: 1_000_000), disk: environment.disk,
+            memory: .pinned(), disk: environment.disk,
             connectivity: FakeConnectivity(), sleep: environment.sleep, now: environment.now
         )
     }

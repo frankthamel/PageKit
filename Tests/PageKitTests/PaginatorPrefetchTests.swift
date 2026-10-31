@@ -51,7 +51,7 @@ private struct HeldConnectivity: ConnectivityMonitoring {
     }
 }
 
-@Suite struct PaginatorPrefetchTests {
+@Suite(.watchdog) struct PaginatorPrefetchTests {
     private let first = IndexToken.first(size: 2)
     private var second: IndexToken { first.next }
     private var third: IndexToken { second.next }

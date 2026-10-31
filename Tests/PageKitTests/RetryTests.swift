@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import PageKit
 
-struct RetryTests {
+@Suite(.watchdog) struct RetryTests {
     private final class Counter: @unchecked Sendable {
         private let lock = NSLock()
         private var values: [Double] = []
@@ -21,6 +21,13 @@ struct RetryTests {
         #expect(ErrorClassifier.classify(URLError(.notConnectedToInternet)) == .offline)
         #expect(ErrorClassifier.classify(URLError(.networkConnectionLost)) == .offline)
         #expect(ErrorClassifier.classify(URLError(.timedOut)) == .timedOut)
+    }
+
+    @Test func aURLErrorWithNoSpecialMeaningIsOther() {
+        guard case .other = ErrorClassifier.classify(URLError(.badURL)) else {
+            Issue.record("Expected .other")
+            return
+        }
     }
 
     @Test func cancellationIsNotAnError() {

@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import PageKit
 
-@Suite struct PaginatorLoadingTests {
+@Suite(.watchdog) struct PaginatorLoadingTests {
     private let serverFailure = PaginationError.server(status: 500)
 
     /// Page 1 holds items 1 and 2, page 2 holds 3 and 4, and page 3 holds 5 and ends the list.

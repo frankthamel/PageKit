@@ -190,9 +190,6 @@ final class SnapshotBroadcaster<Item: Identifiable & Sendable>: @unchecked Senda
     private var continuations: [UUID: AsyncStream<PaginationSnapshot<Item>>.Continuation] = [:]
     private var isFinished = false
 
-    /// The snapshot most recently published.
-    var latest: PaginationSnapshot<Item> { lock.withLock { current } }
-
     /// How many streams are still listening.
     var subscriberCount: Int { lock.withLock { continuations.count } }
 

@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import PageKit
 
-@Suite struct PaginatorCacheTests {
+@Suite(.watchdog) struct PaginatorCacheTests {
     private let serverFailure = PageKitHTTPError(status: 500)
     private let environment = PaginatorEnvironment.testing()
     private let firstToken = IndexToken.first(size: 2)

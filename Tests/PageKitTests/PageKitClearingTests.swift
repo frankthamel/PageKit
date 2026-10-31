@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import PageKit
 
-final class PageKitClearingTests {
+@Suite(.watchdog) final class PageKitClearingTests {
     private let cachesRoot = FileManager.default.temporaryDirectory
         .appendingPathComponent("PageKitClearingTests-\(UUID().uuidString)", isDirectory: true)
     private var durableRoot: URL { cachesRoot.appendingPathComponent("durable-root", isDirectory: true) }
@@ -12,7 +12,7 @@ final class PageKitClearingTests {
 
     private func makeStores() -> (caches: DiskPageStore, durable: DiskPageStore, memory: MemoryPageCache) {
         (DiskPageStore(root: cachesRoot.appendingPathComponent("caches-root", isDirectory: true)),
-         DiskPageStore(root: durableRoot), MemoryPageCache(costLimit: 1_000_000))
+         DiskPageStore(root: durableRoot), .pinned())
     }
 
     private func remember(_ memory: MemoryPageCache, feedID: String) {
@@ -81,7 +81,7 @@ final class PageKitClearingTests {
         let delays = Counter()
 
         let first = PageKit.scheduleMaintenanceOnce(
-            gate: gate, delayNanoseconds: 3_000,
+            gate: gate, priority: .medium, delayNanoseconds: 3_000,
             sleep: { await delays.add($0) }, perform: { await runs.add(1) }
         )
         let second = PageKit.scheduleMaintenanceOnce(
