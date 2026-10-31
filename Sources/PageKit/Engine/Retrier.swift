@@ -17,7 +17,9 @@ struct Retrier: Sendable {
     ///
     /// Throws the classified `PaginationError` once it gives up, or `CancellationError`
     /// if the work or a wait was cancelled. A rate-limited failure waits as long as the
-    /// server asked; other failures use the policy's backoff.
+    /// server asked, unless that is longer than the policy's `maxDelay`. Then it gives up
+    /// at once, so the user is offered a retry rather than a spinner that won't end. Other
+    /// failures, and a rate limit that names no wait, use the policy's backoff.
     func run<T: Sendable>(_ work: @Sendable () async throws -> T) async throws -> T {
         let attempts = max(1, policy.maxAttempts)
         var attempt = 0
@@ -27,11 +29,16 @@ struct Retrier: Sendable {
             } catch {
                 guard let failure = ErrorClassifier.classify(error) else { throw CancellationError() }
                 attempt += 1
-                guard failure.isRetryable, attempt < attempts else { throw failure }
+                guard failure.isRetryable, attempt < attempts, !asksToWaitTooLong(failure) else { throw failure }
                 PageKitLog.logger.debug("Attempt \(attempt) failed, retrying: \(String(describing: failure), privacy: .private)")
                 try await sleep(wait(after: failure, attempt: attempt - 1))
             }
         }
+    }
+
+    private func asksToWaitTooLong(_ failure: PaginationError) -> Bool {
+        if case .rateLimited(let retryAfter?) = failure { return retryAfter > policy.maxDelay }
+        return false
     }
 
     private func wait(after failure: PaginationError, attempt: Int) -> TimeInterval {

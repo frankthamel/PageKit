@@ -108,6 +108,43 @@ import Testing
         #expect(counter.recorded == [7])
     }
 
+    @Test func rateLimitedAtMaxDelayStillWaits() async throws {
+        let counter = Counter()
+        let wait = RetryPolicy.default.maxDelay
+        let value = try await retrier(counter).run { () async throws -> Int in
+            counter.call()
+            if counter.callCount == 1 { throw PageKitHTTPError(status: 429, retryAfter: wait) }
+            return 42
+        }
+        #expect(value == 42)
+        #expect(counter.recorded == [wait])
+    }
+
+    @Test func rateLimitedBeyondMaxDelayStopsWithTheFailure() async {
+        let counter = Counter()
+        let wait = RetryPolicy.default.maxDelay + 1
+        await #expect(throws: PaginationError.rateLimited(retryAfter: wait)) {
+            try await retrier(counter).run { () async throws -> Int in
+                counter.call()
+                throw PageKitHTTPError(status: 429, retryAfter: wait)
+            }
+        }
+        #expect(counter.callCount == 1)
+        #expect(counter.recorded.isEmpty)
+    }
+
+    @Test func rateLimitedWithNoRetryAfterFallsBackToBackoff() async throws {
+        let counter = Counter()
+        let value = try await retrier(counter).run { () async throws -> Int in
+            counter.call()
+            if counter.callCount == 1 { throw PaginationError.rateLimited(retryAfter: nil) }
+            return 42
+        }
+        #expect(value == 42)
+        #expect(counter.recorded.count == 1)
+        #expect(counter.recorded.allSatisfy { (0.25...0.5).contains($0) })
+    }
+
     @Test func cancelledSleepStopsRetrying() async {
         let counter = Counter()
         let retrier = Retrier(policy: .default, sleep: { _ in throw CancellationError() })

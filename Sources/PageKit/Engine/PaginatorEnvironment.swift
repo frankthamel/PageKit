@@ -3,7 +3,7 @@ import Foundation
 /// Everything outside itself that a ``Paginator`` depends on, gathered so tests can
 /// replace each effect.
 struct PaginatorEnvironment: Sendable {
-    /// The longest single wait, one day. A server's `Retry-After` is outside our control.
+    /// The longest single wait, one day, whatever a `RetryPolicy` is set to.
     private static let maxSleep: TimeInterval = 86_400
 
     let memory: MemoryPageCache
