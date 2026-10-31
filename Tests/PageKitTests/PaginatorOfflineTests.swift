@@ -342,6 +342,99 @@ private actor Outage {
         await load.value
     }
 
+    @Test func aFailureThatOutlastsAReconnectIsPickedUpWhenItLands() async {
+        let entered = Gate()
+        let release = Gate()
+        let calls = CallLog()
+        let paginator = paginator(MockSource { [offline] token in
+            let call = await calls.record()
+            if token.page == 1 { return page(1, next: token.next) }
+            if call == 2 {
+                await entered.open()
+                await release.wait()
+                throw offline
+            }
+            return page(2)
+        }, environment: environment)
+        await paginator.start()
+        _ = await paginator.settled()
+        let load = Task { await paginator.loadNextPage() }
+        await entered.wait()
+        await flipOfflineAndBack(paginator)
+
+        await release.open()
+        await load.value
+        await paginator.waitForReconnect()
+
+        let snapshot = await paginator.first { $0.state == .loaded(hasMore: false) }
+        #expect(ids(snapshot) == [1, 2])
+        #expect(!snapshot.isOffline)
+    }
+
+    @Test func aLoadThatSucceedsLeavesNothingForTheReconnectToDo() async {
+        let entered = Gate()
+        let release = Gate()
+        let calls = CallLog()
+        let paginator = paginator(MockSource { token in
+            await calls.record()
+            await entered.open()
+            await release.wait()
+            return page(1)
+        }, environment: environment)
+        await paginator.start()
+        await entered.wait()
+        await flipOfflineAndBack(paginator)
+
+        await release.open()
+        _ = await paginator.settled()
+        await paginator.waitForReconnect()
+
+        #expect(await calls.count == 1)
+    }
+
+    @Test func goingOfflineAgainDropsAResumeThatWasWaiting() async {
+        let entered = Gate()
+        let release = Gate()
+        let calls = CallLog()
+        let paginator = paginator(MockSource { token in
+            await calls.record()
+            await entered.open()
+            await release.wait()
+            throw PageKitHTTPError(status: 400)
+        }, environment: environment)
+        await paginator.start()
+        await entered.wait()
+        await flipOfflineAndBack(paginator)
+        connectivity.setOnline(false)
+        _ = await paginator.first { $0.isOffline }
+
+        await release.open()
+        _ = await paginator.settled()
+        await paginator.waitForReconnect()
+
+        #expect(await calls.count == 1)
+    }
+
+    @Test func aReconnectInTheBackgroundWaitsForTheForeground() async {
+        let outage = Outage()
+        let calls = CallLog()
+        let paginator = paginator(threePages(outage: outage, failingFrom: 2, calls: calls), environment: environment)
+        await paginator.start()
+        _ = await paginator.settled()
+        await outage.set(true)
+        await paginator.loadNextPage()
+        await outage.set(false)
+        await paginator.setAppActive(false)
+        let callsBefore = await calls.count
+
+        await flipOfflineAndBack(paginator)
+        #expect(await calls.count == callsBefore)
+
+        await paginator.setAppActive(true)
+
+        #expect(ids(await paginator.first { $0.state == .loaded(hasMore: true) && $0.items.count == 4 }) == [1, 2, 3, 4])
+    }
+
     // MARK: Read-ahead
 
     @Test func readAheadUsesTheLatestStatusFromOneStream() async {

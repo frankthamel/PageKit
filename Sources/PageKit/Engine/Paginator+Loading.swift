@@ -93,6 +93,7 @@ extension Paginator {
     /// Runs one load from its loading state through to its final snapshot.
     func load(_ operation: LoadOperation) async {
         guard !Task.isCancelled, !isCancelled else { return }
+        defer { runPendingResume() }
         if operation == .refresh { invalidateLoads() }
         guard let token = operation == .nextPage ? nextToken : source.firstToken else { return }
         state = loadingState(for: operation)
@@ -139,7 +140,7 @@ extension Paginator {
             return try await fetchFromNetwork(token)
         }
         let generation = self.generation
-        if let cached = await readPage(token) { return (cached, .cache) }
+        if let cached = await readPage(token) { return (withoutRemovedItems(cached, token: token), .cache) }
         guard generation == self.generation, !Task.isCancelled else { throw CancellationError() }
         guard configuration.cachePolicy != .cacheOnly else {
             return (Page(items: [], nextToken: nil), .cache)
@@ -166,7 +167,7 @@ extension Paginator {
         case .nextPage:
             guard let cached = await readPage(token) else { return false }
             isStale = true
-            apply(cached, token: token, operation: .nextPage, origin: .cache)
+            apply(withoutRemovedItems(cached, token: token), token: token, operation: .nextPage, origin: .cache)
             return true
         case .firstPage, .refresh, .revalidate:
             return false
@@ -208,7 +209,6 @@ extension Paginator {
         nextToken = page.nextToken
         switch origin {
         case .network(let clearEpoch):
-            if operation != .nextPage { listClearEpoch = clearEpoch }
             persist(page, token: token, clearEpoch: clearEpoch)
             lastFailedOperation = nil
             noteNetworkAnswered()
@@ -231,17 +231,23 @@ extension Paginator {
         items.removeAll()
         indexByID.removeAll()
         pageByItem.removeAll()
+        otherPagesByItem.removeAll()
         pageOrder.removeAll()
     }
 
     /// Appends the items whose IDs are new. The token is recorded even if none are,
-    /// so a page of only duplicates still moves the list forward.
+    /// so a page of only duplicates still moves the list forward. A duplicate is noted,
+    /// because that page's cached copy has to follow any edit to the item.
     func append(_ page: Page<Item, Token>, token: Token) {
         pageOrder.append(token)
-        for item in page.items where indexByID[item.id] == nil {
-            indexByID[item.id] = items.count
-            pageByItem[item.id] = token
-            items.append(item)
+        for item in page.items {
+            if indexByID[item.id] == nil {
+                indexByID[item.id] = items.count
+                pageByItem[item.id] = token
+                items.append(item)
+            } else if pageByItem[item.id] != token {
+                otherPagesByItem[item.id, default: []].insert(token)
+            }
         }
     }
 

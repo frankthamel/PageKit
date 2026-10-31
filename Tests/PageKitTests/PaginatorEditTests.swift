@@ -2,6 +2,11 @@ import Foundation
 import Testing
 @testable import PageKit
 
+/// A clock a test can move by hand.
+private final class Clock: @unchecked Sendable {
+    var now = Date(timeIntervalSince1970: 1_000_000)
+}
+
 @Suite struct PaginatorEditTests {
     private let environment = PaginatorEnvironment.testing()
     private let first = IndexToken.first(size: 2)
@@ -56,6 +61,30 @@ import Testing
         for _ in 1..<pages { await paginator.loadNextPage() }
         await paginator.waitForPendingWrites()
         return paginator
+    }
+
+    /// `environment` as a new launch finds it: the same disk, with nothing in memory.
+    private var relaunchEnvironment: PaginatorEnvironment {
+        PaginatorEnvironment(
+            memory: MemoryPageCache(costLimit: 1_000_000), disk: environment.disk,
+            connectivity: FakeConnectivity(), sleep: environment.sleep, now: environment.now
+        )
+    }
+
+    /// What a new launch shows under `.cacheOnly`.
+    private func relaunchedItems(pageSource: MockSource? = nil) async -> [TestItem] {
+        let paginator = Paginator.testing(
+            pageSource ?? threePages(), policy: .cacheOnly, environment: relaunchEnvironment
+        )
+        await paginator.start()
+        return await paginator.settled().items
+    }
+
+    /// Page 1 holds 1 and 2. Page 2 repeats 2, as a shifted feed can, and ends the list.
+    private var overlappingPages: MockSource {
+        MockSource { token in
+            token.page == 1 ? page(1, 2, next: token.next) : page(2, 3)
+        }
     }
 
     private func expectIndexIsRight(_ paginator: Paginator<MockSource>) async {
@@ -251,9 +280,7 @@ import Testing
         await paginator.update(TestItem(id: 1, title: "Edited"))
         await paginator.cancel()
 
-        let relaunched = await opened(policy: .cacheOnly)
-
-        let items = await relaunched.current().items
+        let items = await relaunchedItems()
         #expect(items.map(\.id) == [1, 2, 4])
         #expect(items[0].title == "Edited")
     }
@@ -263,9 +290,90 @@ import Testing
         await paginator.remove(id: 1)
         await paginator.cancel()
 
-        let relaunched = await opened(policy: .cacheOnly)
+        #expect(await relaunchedItems().isEmpty)
+    }
 
-        #expect(await relaunched.current().state == .empty)
+    @Test func aRemovedDuplicateStaysGoneAfterRelaunch() async {
+        let paginator = await opened(overlappingPages, pages: 2)
+        #expect(ids(await paginator.current()) == [1, 2, 3])
+
+        await paginator.remove(id: 2)
+        await paginator.cancel()
+
+        #expect(await relaunchedItems().map(\.id) == [1, 3])
+    }
+
+    @Test func aDuplicateFromARestoredListStaysGoneToo() async {
+        await opened(overlappingPages, pages: 2).cancel()
+        let paginator = Paginator.testing(overlappingPages, policy: .cacheOnly, environment: relaunchEnvironment)
+        await paginator.start()
+        _ = await paginator.settled()
+
+        await paginator.remove(id: 2)
+        await paginator.cancel()
+
+        #expect(await relaunchedItems().map(\.id) == [1, 3])
+    }
+
+    @Test func aParkedPageCannotBringARemovedItemBack() async {
+        var configuration = PaginationConfiguration.testing(.cacheThenNetwork)
+        configuration.lookaheadPages = 1
+        let paginator = Paginator(source: overlappingPages, configuration: configuration, environment: environment)
+        await paginator.start()
+        _ = await paginator.settled()
+        await paginator.waitForReadAhead()
+        await paginator.waitForPendingWrites()
+
+        await paginator.remove(id: 2)
+        await paginator.loadNextPage()
+        await paginator.waitForPendingWrites()
+        await paginator.cancel()
+
+        #expect(ids(await paginator.current()) == [1, 3])
+        #expect(await diskPage(second)?.items.map(\.id) == [3])
+    }
+
+    @Test func aFallbackPageCannotBringARemovedItemBack() async {
+        let failing = CallLog()
+        let paginator = await opened(MockSource { token in
+            if token.page == 1 { return page(1, 2, next: token.next) }
+            if await failing.record() == 1 { return page(2, 3) }
+            throw PageKitHTTPError(status: 400)
+        }, pages: 2)
+        await paginator.refresh()
+        await paginator.waitForPendingWrites()
+        await environment.disk.save(
+            page(2, 3) as Page<TestItem, IndexToken>, feedID: "test", token: second, schemaVersion: 1
+        )
+
+        await paginator.remove(id: 2)
+        await paginator.loadNextPage()
+
+        #expect(ids(await paginator.current()) == [1, 3])
+    }
+
+    @Test func aTrailingPageEmptiedByEditsDoesNotStallARelaunch() async {
+        let paginator = await opened(pages: 2)
+        await paginator.setAppActive(false)
+        await paginator.remove(id: 3)
+        await paginator.remove(id: 4)
+        await paginator.cancel()
+
+        let relaunched = Paginator.testing(threePages(), policy: .cacheThenNetwork, environment: relaunchEnvironment)
+        await relaunched.start()
+
+        #expect(ids(await relaunched.first { $0.state == .loaded(hasMore: false) }) == [1, 2, 5])
+    }
+
+    @Test func aPageEmptiedInTheBackgroundMovesOnInTheForeground() async {
+        let paginator = await opened(pages: 2)
+        await paginator.setAppActive(false)
+        await paginator.remove(id: 3)
+        await paginator.remove(id: 4)
+
+        await paginator.setAppActive(true)
+
+        #expect(ids(await paginator.first { $0.state == .loaded(hasMore: false) }) == [1, 2, 5])
     }
 
     // MARK: Edits during a load
@@ -360,6 +468,24 @@ import Testing
         #expect(ids(await paginator.current()) == [1])
     }
 
+    @Test func removingTheLastItemDuringARevalidationEndsStale() async {
+        await opened(MockSource { _ in page(1) }).cancel()
+        let entered = Gate()
+        let release = Gate()
+        let paginator = Paginator.testing(MockSource { _ in
+            await entered.open()
+            await release.wait()
+            return page(1)
+        }, policy: .cacheThenNetwork, environment: environment)
+        await paginator.start()
+        await entered.wait()
+
+        await paginator.remove(id: 1)
+        await release.open()
+
+        #expect(await !paginator.current().isStale)
+    }
+
     @Test func aRequestAfterAnEditIsBelieved() async {
         let paginator = await opened()
         await paginator.remove(id: 1)
@@ -410,6 +536,92 @@ import Testing
         await edit.value
 
         #expect(await diskPage(first) == nil)
+    }
+
+    @Test func anEditAfterAnInPlaceRevalidationIsSaved() async {
+        let connectivity = FakeConnectivity()
+        let environment = PaginatorEnvironment.testing(connectivity: connectivity)
+        let paginator = Paginator.testing(threePages(), policy: .networkFirst, environment: environment)
+        await paginator.start()
+        _ = await paginator.settled()
+        await paginator.waitForPendingWrites()
+        await environment.disk.removeFeed("test")
+        environment.memory.removeFeed("test")
+
+        connectivity.setOnline(false)
+        _ = await paginator.first { $0.isOffline }
+        connectivity.setOnline(true)
+        _ = await paginator.first { !$0.isOffline }
+        await paginator.waitForReconnect()
+        await paginator.remove(id: 1)
+
+        let saved: Page<TestItem, IndexToken>? = await environment.disk.page(
+            feedID: "test", token: first, schemaVersion: 1
+        )
+        #expect(saved?.items.map(\.id) == [2])
+    }
+
+    @Test func anEditReachesAPageHeldOnlyOnDisk() async {
+        let paginator = await opened()
+        environment.memory.removeFeed("test")
+
+        await paginator.remove(id: 1)
+
+        #expect(await diskPage(first)?.items.map(\.id) == [2])
+        #expect(memoryPage(first) == nil)
+    }
+
+    @Test func anEditReachesAPageHeldOnlyInMemory() async {
+        let paginator = await opened()
+        await environment.disk.removePages(feedID: "test", except: [IndexToken]())
+
+        await paginator.remove(id: 1)
+
+        #expect(memoryPage(first)?.items.map(\.id) == [2])
+        #expect(await diskPage(first) == nil)
+    }
+
+    @Test func anEditDoesNotExtendTheChainsAge() async {
+        let clock = Clock()
+        let environment = PaginatorEnvironment.testing(now: { clock.now })
+        let paginator = Paginator.testing(threePages(), policy: .networkFirst, environment: environment)
+        await paginator.start()
+        _ = await paginator.settled()
+        await paginator.waitForPendingWrites()
+        let saved = await environment.disk.manifest(feedID: "test", as: IndexToken.self, schemaVersion: 1)
+
+        clock.now = clock.now.addingTimeInterval(90)
+        await paginator.update(TestItem(id: 2, title: "Edited"))
+
+        let edited = await environment.disk.manifest(feedID: "test", as: IndexToken.self, schemaVersion: 1)
+        #expect(edited?.updatedAt == saved?.updatedAt)
+    }
+
+    @Test func anEditQueuedBeforeAClearCannotOverwriteANewerPage() async {
+        let entered = Gate()
+        let release = Gate()
+        let writes = CallLog()
+        var held = environment
+        held.beforeDiskWrite = {
+            guard await writes.record() == 3 else { return }
+            await entered.open()
+            await release.wait()
+        }
+        let paginator = Paginator.testing(threePages(), policy: .networkFirst, environment: held)
+        await paginator.start()
+        _ = await paginator.settled()
+        await paginator.waitForPendingWrites()
+
+        let edit = Task { await paginator.remove(id: 1) }
+        await entered.wait()
+        await clearFeed()
+        await environment.disk.save(
+            page(8) as Page<TestItem, IndexToken>, feedID: "test", token: first, schemaVersion: 1
+        )
+        await release.open()
+        await edit.value
+
+        #expect(await diskPage(first)?.items.map(\.id) == [8])
     }
 
     @Test func aListLoadedAfterAClearIsSavedAgain() async {
@@ -463,9 +675,9 @@ import Testing
         await paginator.cancel()
 
         #expect(ids(await paginator.current()) == [1, 2, 4])
-        #expect(await diskPage(second)?.items.map(\.id) == [4])
-        let relaunched = await opened(policy: .cacheOnly)
-        #expect(await !ids(relaunched.current()).contains(3))
+        #expect(await diskPage(second) == nil)
+        #expect(memoryPage(second) == nil)
+        #expect(await relaunchedItems().isEmpty)
     }
 
     // MARK: After cancel

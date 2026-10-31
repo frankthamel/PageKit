@@ -1,8 +1,7 @@
 /// Changes the user made to single items, which land in the list and both caches at once.
 ///
-/// Only the page holding the item is rewritten, from what the list shows. That needs no
-/// cache read, so an evicted page file is no obstacle: the file just comes back with
-/// the page's current items.
+/// The pages holding the item are rewritten from what the list shows, which needs no cache
+/// read, and only where they are still cached. An evicted page stays evicted.
 extension Paginator {
     /// One user change, kept so a request from before it can't undo it.
     struct LocalEdit {
@@ -28,6 +27,7 @@ extension Paginator {
         if items.isEmpty {
             // Whatever is running belongs to the list that has just gone.
             invalidateLoads()
+            isStale = false
             state = nextToken == nil ? .empty : .loaded(hasMore: true)
         }
         publish()
@@ -46,16 +46,16 @@ extension Paginator {
         await waitForPendingWrites()
     }
 
-    /// Notes the edit for requests under way and saves the page it changed.
-    ///
-    /// The save carries the list's clear epoch, so after a clear the list changes but no
-    /// page of the old list goes back into a cache.
+    /// Notes the edit for requests under way, and saves every page that holds the item.
+    /// A page that only repeated the item loses its copy, as the list never showed it.
     private func record(_ edit: LocalEdit, in token: Token) {
         localEdits.append(edit)
-        guard let position = pageOrder.firstIndex(of: token) else { return }
-        let next = position + 1 < pageOrder.count ? pageOrder[position + 1] : nextToken
-        let page = Page(items: items.filter { pageByItem[$0.id] == token }, nextToken: next)
-        persist(page, token: token, clearEpoch: listClearEpoch)
+        let repeats = otherPagesByItem.removeValue(forKey: edit.id) ?? []
+        for token in repeats.union([token]) {
+            guard let position = pageOrder.firstIndex(of: token) else { continue }
+            let next = position + 1 < pageOrder.count ? pageOrder[position + 1] : nextToken
+            replaceCachedPage(Page(items: items.filter { pageByItem[$0.id] == token }, nextToken: next), token: token)
+        }
     }
 
     /// The page `request` brings, with every edit made since it began.
@@ -67,5 +67,16 @@ extension Paginator {
             items.compactMap { $0.id == edit.id ? edit.replacement : $0 }
         }
         return Page(items: items, nextToken: page.nextToken)
+    }
+
+    /// `page`, read from the cache, without any item removed since. A page parked before a
+    /// removal was out of the list's reach, so it is corrected here, in the cache too.
+    func withoutRemovedItems(_ page: Page<Item, Token>, token: Token) -> Page<Item, Token> {
+        let removed = Set(localEdits.lazy.filter { $0.replacement == nil }.map(\.id))
+        let items = page.items.filter { !removed.contains($0.id) }
+        guard items.count < page.items.count else { return page }
+        let edited = Page(items: items, nextToken: page.nextToken)
+        replaceCachedPage(edited, token: token)
+        return edited
     }
 }

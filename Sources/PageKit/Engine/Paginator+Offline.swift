@@ -21,6 +21,7 @@ extension Paginator {
         guard !isCancelled else { return }
         let reconnected = isOffline && status.isOnline
         connectivityStatus = status
+        if !status.isOnline { isResumePending = false }
         if isOffline == status.isOnline {
             isOffline = !status.isOnline
             publish()
@@ -40,12 +41,24 @@ extension Paginator {
     /// the monitor said stands, because the monitor will say when that changes.
     func noteNetworkAnswered() {
         isOffline = connectivityStatus?.isOnline == false
+        isResumePending = false
+    }
+
+    /// Runs the resume a reconnect had to put off, if there is one and it can run now.
+    func runPendingResume() {
+        guard isResumePending else { return }
+        reconnectTask = Task { await resumeAfterReconnect() }
     }
 
     /// Silently refreshes page 1 if the list goes no further, then retries what the list
     /// was waiting on. Past page 1 a refresh could shrink the list, so the items stay stale.
+    ///
+    /// During a load or in the background it waits. A load that gets an answer from the
+    /// network leaves nothing to do, but one that fails may be what this was to retry.
     private func resumeAfterReconnect() async {
-        guard !isCancelled, configuration.cachePolicy != .cacheOnly, !state.isLoading else { return }
+        guard !isCancelled, configuration.cachePolicy != .cacheOnly else { return }
+        isResumePending = state.isLoading || !isAppActive
+        guard !isResumePending else { return }
         guard !pageOrder.isEmpty else { return await retry() }
         let wasWaitingForNextPage = lastFailedOperation == .nextPage
         if pageOrder.count == 1 { await revalidateFirstPage() }

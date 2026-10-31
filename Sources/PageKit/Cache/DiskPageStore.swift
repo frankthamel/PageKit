@@ -23,7 +23,7 @@ actor DiskPageStore {
     private let root: URL
     private let now: @Sendable () -> Date
     private let fileManager = FileManager.default
-    private let clearEpochs = ClearEpochs()
+    nonisolated let clearEpochs = ClearEpochs()
 
     /// Creates a store.
     /// - Parameters:
@@ -136,6 +136,20 @@ actor DiskPageStore {
         guard clearEpoch == self.clearEpoch(for: feedID) else { return }
         save(page, feedID: feedID, token: token, schemaVersion: schemaVersion)
         saveManifest(manifest, feedID: feedID)
+    }
+
+    /// Replaces a page that is still on disk, and leaves the manifest as it is.
+    ///
+    /// A local edit changes neither the chain nor its age. If the page has gone, by a clear
+    /// or by eviction, nothing is written, so an edit can't put it back.
+    ///
+    /// `clearEpoch` is the feed's ``clearEpoch(for:)`` from the time of the edit.
+    func replacePage<Item: Codable & Sendable, Token: PageToken>(
+        _ page: Page<Item, Token>, feedID: String, token: Token, schemaVersion: Int, clearEpoch: Int
+    ) {
+        guard clearEpoch == self.clearEpoch(for: feedID), let url = pageURL(feedID, token),
+              fileManager.fileExists(atPath: url.path) else { return }
+        save(page, feedID: feedID, token: token, schemaVersion: schemaVersion)
     }
 
     /// Deletes every page of a feed except those for `tokens`. The manifest stays.
@@ -272,7 +286,7 @@ actor DiskPageStore {
 /// Counts how often each feed has been cleared.
 ///
 /// `@unchecked Sendable` is safe because both counts are only touched while holding `lock`.
-private final class ClearEpochs: @unchecked Sendable {
+final class ClearEpochs: @unchecked Sendable {
     private let lock = NSLock()
     private var all = 0
     private var byFeed: [String: Int] = [:]

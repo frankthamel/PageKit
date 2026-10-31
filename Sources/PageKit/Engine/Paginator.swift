@@ -35,13 +35,12 @@ public actor Paginator<Source: PageSource> {
     var indexByID: [Item.ID: Int] = [:]
     /// The token of every page that makes up `items`, in order.
     var pageOrder: [Token] = []
-    /// The feed's clear epoch from before the list's oldest page was asked for. Once the
-    /// feed has moved past this, the list's pages must stay out of the caches.
-    var listClearEpoch = 0
     /// The token of the following page, or `nil` at the end of the list.
     var nextToken: Token?
     /// The page each item came from.
     var pageByItem: [Item.ID: Token] = [:]
+    /// Later pages that repeat an item, whose cached copies still hold it.
+    var otherPagesByItem: [Item.ID: Set<Token>] = [:]
     /// Goes up whenever running loads stop counting, so their late results can be dropped.
     ///
     /// Invariant: any path that changes `state` during a load must bump this, or that
@@ -74,8 +73,9 @@ public actor Paginator<Source: PageSource> {
     var startTask: Task<Void, Never>?
     /// Set once by ``cancel()``, which is final.
     var isCancelled = false
-    /// Every edit so far, for requests that began before one. Edits are the user's own
-    /// actions, so this stays small.
+    /// Every edit so far, kept for the paginator's life: a request from before an edit
+    /// can land at any time, and a parked page can be served at any time. It grows by one
+    /// entry, holding at most one item, per edit the user makes.
     var localEdits: [LocalEdit] = []
     /// Delivers network status for as long as the paginator lives.
     var connectivityTask: Task<Void, Never>?
@@ -83,6 +83,8 @@ public actor Paginator<Source: PageSource> {
     var connectivityStatus: ConnectivityStatus?
     /// The work the most recent reconnect started.
     var reconnectTask: Task<Void, Never>?
+    /// Whether a reconnect is waiting for a load to settle or the app to come back.
+    var isResumePending = false
     /// The most recent disk write. Each one waits for the one before, so they land in order.
     var pendingWrite: Task<Void, Never>?
     /// The most recent queued deletion of cached pages.

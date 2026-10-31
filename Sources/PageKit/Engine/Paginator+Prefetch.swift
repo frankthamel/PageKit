@@ -20,8 +20,9 @@ extension Paginator {
         scheduleNextPage()
     }
 
-    /// Loads the next page if every item of the newest one has been removed, as nothing
-    /// on screen would lead to it. A background app moves on with its next explicit load.
+    /// Loads the next page if the newest one shows no items, as nothing on screen would
+    /// lead to it. This runs when an edit, a restore or a return to the foreground finds
+    /// such a page, not on every cell, so a run of blank server pages can't spin.
     func loadNextPageIfNewestIsBlank() {
         guard isAppActive, state.canLoadMore, newestPageWasBlank else { return }
         scheduleNextPage()
@@ -41,9 +42,13 @@ extension Paginator {
     ///
     /// Call this from `scenePhase`. In the background nothing is prefetched, though
     /// ``loadNextPage()`` still works. Read-ahead stops after the page it is waiting on,
-    /// and starts again with the next page shown.
+    /// and starts again with the next page shown. Coming back picks up a reconnect that
+    /// happened meanwhile.
     public func setAppActive(_ isActive: Bool) {
         isAppActive = isActive
+        guard isActive else { return }
+        loadNextPageIfNewestIsBlank()
+        runPendingResume()
     }
 
     private var canPrefetch: Bool {
@@ -53,7 +58,7 @@ extension Paginator {
     /// Whether the newest page shows no items, which scrolling cannot move past. The
     /// distance trigger leaves such a page to an explicit ``loadNextPage()``.
     ///
-    /// Blank pages the user made are moved past when made, by `loadNextPageIfNewestIsBlank`.
+    /// Blank pages left by edits are moved past by `loadNextPageIfNewestIsBlank`.
     private var newestPageWasBlank: Bool {
         items.last.flatMap { pageByItem[$0.id] } != pageOrder.last
     }

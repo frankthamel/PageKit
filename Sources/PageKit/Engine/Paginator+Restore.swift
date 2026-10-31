@@ -55,7 +55,6 @@ extension Paginator {
     @discardableResult
     func restoreFromCache(reporting error: PaginationError? = nil) async -> Bool {
         let generation = self.generation
-        let clearEpoch = environment.disk.clearEpoch(for: feedID)
         await environment.beforeDiskRead()
         let manifest = await environment.disk.manifest(
             feedID: feedID, as: Token.self, schemaVersion: configuration.schemaVersion
@@ -80,13 +79,13 @@ extension Paginator {
         guard pages.contains(where: { !$0.page.items.isEmpty }) else { return false }
 
         pages.forEach { append($0.page, token: $0.token) }
-        listClearEpoch = clearEpoch
         nextToken = pages.last?.page.nextToken
         // Under `.cacheOnly` no network load is coming to confirm these items.
         isStale = configuration.cachePolicy != .cacheOnly
         lastError = error
         state = settledState
         publish()
+        loadNextPageIfNewestIsBlank()
         return true
     }
 
@@ -189,6 +188,25 @@ extension Paginator {
             await disk.save(
                 page, manifest: manifest, feedID: feedID, token: token,
                 schemaVersion: schemaVersion, clearEpoch: clearEpoch
+            )
+        }
+    }
+
+    /// Replaces a page with its edited form, wherever it is still cached.
+    ///
+    /// A page gone from a cache has nothing to bring back, so it stays gone. That covers a
+    /// clear and an eviction alike. The disk check waits for its turn in the queue, so
+    /// it sees every earlier write and discard.
+    func replaceCachedPage(_ page: Page<Item, Token>, token: Token) {
+        guard configuration.cachePolicy.usesCache else { return }
+        let key = PageKey(feedID: feedID, token: token)
+        if environment.memory.page(for: key, as: Page<Item, Token>.self) != nil {
+            environment.memory.store(page, for: key, cost: cost(of: page))
+        }
+        let clearEpoch = environment.disk.clearEpoch(for: feedID)
+        enqueueDiskWrite { [feedID, schemaVersion = configuration.schemaVersion] disk in
+            await disk.replacePage(
+                page, feedID: feedID, token: token, schemaVersion: schemaVersion, clearEpoch: clearEpoch
             )
         }
     }
