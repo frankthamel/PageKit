@@ -129,11 +129,43 @@ actor DiskPageStore {
         }
     }
 
+    // MARK: Listing
+
+    /// A feed folder as found on disk.
+    struct StoredFeed: Sendable {
+        /// The folder's name under the root.
+        let folder: String
+        /// The total size of the files in the folder.
+        let bytes: Int
+        /// The manifest's header, or `nil` when it is missing or unreadable.
+        let header: FeedManifestHeader?
+    }
+
+    /// Every feed folder under the root, for disk maintenance.
+    func storedFeeds() -> [StoredFeed] {
+        let folders = (try? fileManager.contentsOfDirectory(atPath: root.path)) ?? []
+        return folders.map { name in
+            let folder = root.appendingPathComponent(name, isDirectory: true)
+            let files = (try? fileManager.contentsOfDirectory(atPath: folder.path)) ?? []
+            let bytes = files.reduce(0) { total, file in
+                let attributes = try? fileManager.attributesOfItem(atPath: folder.appendingPathComponent(file).path)
+                return total + ((attributes?[.size] as? Int) ?? 0)
+            }
+            let manifest = try? Data(contentsOf: folder.appendingPathComponent(Self.manifestFileName))
+            return StoredFeed(folder: name, bytes: bytes, header: manifest.flatMap { try? decoder.decode(FeedManifestHeader.self, from: $0) })
+        }
+    }
+
     // MARK: Removal
 
     /// Deletes everything stored for one feed.
     func removeFeed(_ feedID: String) {
         try? fileManager.removeItem(at: feedFolder(feedID))
+    }
+
+    /// Deletes one feed folder by its name on disk. Used by maintenance, which cannot recover feed IDs from folder names.
+    func removeFolder(_ name: String) {
+        try? fileManager.removeItem(at: root.appendingPathComponent(name, isDirectory: true))
     }
 
     /// Deletes every feed under this store's root.
