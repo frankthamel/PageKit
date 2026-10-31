@@ -5,7 +5,7 @@ import Foundation
 /// Each retry waits roughly twice as long as the last, up to `maxDelay`. A random
 /// factor keeps many devices from retrying at the same instant.
 public struct RetryPolicy: Sendable {
-    /// How many times a load is tried in total.
+    /// How many times a load is tried in total. Values below 1 behave as 1.
     public var maxAttempts: Int
 
     /// The wait before the first retry, in seconds.
@@ -28,9 +28,11 @@ public struct RetryPolicy: Sendable {
         self.maxDelay = maxDelay
     }
 
-    /// The wait before retry number `attempt`, counting from 0, with 50% to 100% jitter.
-    func delay(forAttempt attempt: Int) -> TimeInterval {
-        let exponential = min(maxDelay, baseDelay * pow(2, Double(attempt)))
-        return exponential * Double.random(in: 0.5...1.0)
+    /// The wait before retry number `attempt`, counting from 0.
+    /// - Parameters:
+    ///   - attempt: The retry number, counting from 0.
+    ///   - random: The jitter factor, from 0.5 to 1.0. Tests pass a fixed value.
+    func delay(forAttempt attempt: Int, random: Double = Double.random(in: 0.5...1.0)) -> TimeInterval {
+        min(maxDelay, baseDelay * pow(2, Double(attempt))) * random
     }
 }
