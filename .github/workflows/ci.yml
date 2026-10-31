@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Xcode ${{ matrix.xcode }}
+    runs-on: ${{ matrix.runner }}
+    # A hang must fail the run rather than hold a runner for hours.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: xcode-27
+            xcode: "27.1"
+          - runner: macos-26
+            xcode: "26.6"
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_${{ matrix.xcode }}.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Test
+        run: swift test
+
+      - name: Strict concurrency build
+        run: swift build -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+
+      - name: Build for iOS
+        run: xcodebuild build -scheme PageKit -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO
+
+      - name: Build for tvOS
+        run: xcodebuild build -scheme PageKit -destination 'generic/platform=tvOS' CODE_SIGNING_ALLOWED=NO
+
+      - name: Build for watchOS
+        run: xcodebuild build -scheme PageKit -destination 'generic/platform=watchOS' CODE_SIGNING_ALLOWED=NO
+
+      - name: Build documentation
+        run: xcodebuild docbuild -scheme PageKit -destination 'generic/platform=macOS' OTHER_DOCC_FLAGS=--warnings-as-errors
+
+  api-breaking-changes:
+    name: API breaking changes
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Compare with the last tag
+        run: |
+          tag=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          if [ -z "$tag" ]; then
+            echo "No tag yet, so there is nothing to compare with."
+            exit 0
+          fi
+          swift package diagnose-api-breaking-changes "$tag"

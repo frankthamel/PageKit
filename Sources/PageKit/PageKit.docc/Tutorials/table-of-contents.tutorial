@@ -1,0 +1,13 @@
+@Tutorials(name: "PageKit") {
+    @Intro(title: "Paginate a list with PageKit") {
+        Build a recipe list that opens from cache, loads more as you scroll, and survives a bad connection.
+    }
+
+    @Chapter(name: "Getting started") {
+        Write a source, wrap it in a view model, and show it in SwiftUI.
+
+        @Image(source: "list-rows.png", alt: "Three list rows, the last one still loading.")
+
+        @TutorialReference(tutorial: "doc:BuildingAPaginatedList")
+    }
+}

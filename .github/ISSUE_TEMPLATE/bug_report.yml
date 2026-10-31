@@ -1,0 +1,53 @@
+name: Bug report
+description: Something in PageKit doesn't work as documented.
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: PageKit version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform and Xcode version
+      placeholder: iOS 18.4, Xcode 26.6
+    validations:
+      required: true
+  - type: dropdown
+    id: api-style
+    attributes:
+      label: API style
+      options:
+        - Index (IndexToken)
+        - Cursor (CursorToken)
+        - Custom PageToken
+    validations:
+      required: true
+  - type: dropdown
+    id: cache-policy
+    attributes:
+      label: Cache policy
+      options:
+        - cacheThenNetwork
+        - networkFirst
+        - networkOnly
+        - cacheOnly
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: The smallest `PageSource` and steps that show the problem.
+      render: swift
+    validations:
+      required: true

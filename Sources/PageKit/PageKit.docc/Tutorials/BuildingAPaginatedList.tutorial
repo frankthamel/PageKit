@@ -1,0 +1,83 @@
+@Tutorial(time: 15) {
+    @Intro(title: "Building a paginated list") {
+        Turn a JSON API into a scrolling SwiftUI list, with a loading footer, errors and pull to refresh.
+    }
+
+    @Section(title: "Describe the list") {
+        @ContentAndMedia {
+            A source tells PageKit how to fetch one page. Everything else builds on it.
+        }
+
+        @Steps {
+            @Step {
+                Define the item. PageKit needs an identity to remove duplicates, and `Codable` to save pages for offline use.
+
+                @Code(name: "Recipe.swift", file: "recipe-01.swift")
+            }
+
+            @Step {
+                Define the shape of the API's response.
+
+                @Code(name: "RecipesSource.swift", file: "source-01.swift")
+            }
+
+            @Step {
+                Make a source. Say how to build a request from a token, and how to turn a response into a page. A `nil` next token ends the list.
+
+                @Code(name: "RecipesSource.swift", file: "source-02.swift")
+            }
+        }
+    }
+
+    @Section(title: "Drive it with a view model") {
+        @ContentAndMedia {
+            A view model owns one paginator and keeps the latest snapshot in one property, so each change causes one render.
+        }
+
+        @Steps {
+            @Step {
+                Hold the snapshot and the paginator. Cancel the paginator when the view model goes away.
+
+                @Code(name: "RecipesViewModel.swift", file: "viewmodel-01.swift")
+            }
+
+            @Step {
+                Start the paginator and follow its snapshots. Then forward cell appearances, which drive prefetching, and retries.
+
+                @Code(name: "RecipesViewModel.swift", file: "viewmodel-02.swift")
+            }
+
+            @Step {
+                Add refresh in its own task. Cancelling a caller aborts its load, and `.refreshable` can cancel its task when the view re-renders.
+
+                @Code(name: "RecipesViewModel.swift", file: "viewmodel-03.swift")
+            }
+        }
+    }
+
+    @Section(title: "Show it on screen") {
+        @ContentAndMedia {
+            The screen reads one snapshot. The library says which state the list is in, and you decide what each one looks like.
+        }
+
+        @Steps {
+            @Step {
+                Show the items in a list keyed by ID, and report each row as it appears.
+
+                @Code(name: "RecipesView.swift", file: "view-01.swift")
+            }
+
+            @Step {
+                Add a footer driven by the state. It shows a spinner, a retry button or the end of the list.
+
+                @Code(name: "RecipesView.swift", file: "view-02.swift")
+            }
+
+            @Step {
+                Start the feed with `.task`, which ends with the view, and add pull to refresh.
+
+                @Code(name: "RecipesView.swift", file: "view-03.swift")
+            }
+        }
+    }
+}

@@ -21,9 +21,11 @@ public enum PageKit {
     /// Deletes feeds that are past their `maxAge`, then trims the caches folder
     /// to its size limit by deleting the least recently updated feeds.
     ///
-    /// `.durable` feeds are never trimmed by size. It runs by itself shortly
-    /// after the first feed opens, and can also be called from a background
-    /// task such as `BGAppRefreshTask`.
+    /// `.durable` feeds are never trimmed by size. Memory entries are not purged
+    /// by age: this only works on disk, and the memory cache drops pages when its
+    /// limits or the system need the room. It runs by itself shortly after the
+    /// first feed opens, and can also be called from a background task such as
+    /// `BGAppRefreshTask`.
     public static func performMaintenance() async {
         await performMaintenance(caches: .shared(for: .caches), durable: .shared(for: .durable))
     }
