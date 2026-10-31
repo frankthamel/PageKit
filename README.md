@@ -54,6 +54,7 @@ Add the package, describe your API, and show a list.
 
 ```swift
 import Foundation
+import Observation
 import PageKit
 import SwiftUI
 
@@ -78,38 +79,56 @@ let productsSource = URLSessionPageSource<ProductsResponse, Product, IndexToken>
     }
 )
 
+@MainActor @Observable
+final class ProductListModel {
+    private(set) var snapshot = PaginationSnapshot<Product>.initial
+    private let paginator = Paginator(source: productsSource)
+
+    deinit {
+        let paginator = paginator
+        Task { await paginator.cancel() }
+    }
+
+    func run() async {
+        await paginator.start()
+        for await snapshot in paginator.snapshots() { self.snapshot = snapshot }
+    }
+
+    func itemAppeared(_ product: Product) {
+        Task { await paginator.itemAppeared(id: product.id) }
+    }
+}
+
 struct ProductList: View {
-    @State private var paginator = Paginator(source: productsSource)
-    @State private var snapshot = PaginationSnapshot<Product>.initial
+    @State private var model = ProductListModel()
 
     var body: some View {
-        List(snapshot.items) { product in
+        List(model.snapshot.items) { product in
             Text(product.name)
-                .onAppear { Task { await paginator.itemAppeared(id: product.id) } }
+                .onAppear { model.itemAppeared(product) }
         }
-        .task {
-            await paginator.start()
-            for await next in paginator.snapshots() { snapshot = next }
-        }
+        .task { await model.run() }
     }
 }
 ```
 
-That list opens from cache, retries failures, saves pages to disk and loads the next page before the user reaches the end. For a real screen with footers, errors and pull to refresh, use the [view model](#a-reusable-view-model) and [screens](#swiftui-screen) below.
+That list opens from cache, retries failures, saves pages to disk and loads the next page before the user reaches the end. This uses `@Observable`, so it needs iOS 17. For a real screen with footers, errors and pull to refresh, or for iOS 15 and 16, use the generic [view model](#a-reusable-view-model) and [screens](#swiftui-screen) below.
 
 ## Install
 
 PageKit needs Swift 6.0 or later (Xcode 16 or later). It runs on iOS 15, macOS 12, tvOS 15 and watchOS 8.
 
+CI runs on Xcode 26.6 and Xcode 27.1 only: the tests on macOS, plus builds for iOS, tvOS and watchOS. Xcode 16 is the floor set by the package's Swift tools version. It isn't tested, and neither are the older platform versions at run time.
+
 **In Xcode:** choose **File > Add Package Dependencies**, then enter:
 
-```
+```text
 https://github.com/frankthamel/PageKit.git
 ```
 
 **In `Package.swift`:**
 
-```
+```swift
 dependencies: [
     .package(url: "https://github.com/frankthamel/PageKit.git", from: "0.1.0"),
 ],
@@ -287,7 +306,7 @@ final class FeedViewModel<Source: PageSource> {
 > [!IMPORTANT]
 > **Cancelling a caller aborts its load.** If the task awaiting `refresh()`, `loadNextPage()` or `retry()` is cancelled, the load stops and the list goes back to its earlier state. SwiftUI's `.refreshable` can cancel its task when the view re-renders, and a refresh is exactly what causes a re-render. So call `refresh()` from a task that outlives a re-render, as `refresh()` above does. Awaiting that task's `.value` keeps the spinner up until the load ends, and the cancellation never reaches it.
 
-**On iOS 15 and 16,** make the same class an `ObservableObject` and hold it with `@StateObject`. Nothing else changes.
+**On iOS 15 and 16,** `@Observable` isn't available, so make the same class an `ObservableObject`:
 
 ```swift
 @MainActor
@@ -296,6 +315,12 @@ final class FeedViewModel<Source: PageSource>: ObservableObject {
     // The rest is the same.
 }
 ```
+
+The [SwiftUI screen](#swiftui-screen) below then needs three changes:
+
+- Hold the model with `@StateObject private var model = ...` instead of `@State`.
+- Use the one-parameter `onChange`: `.onChange(of: scenePhase) { phase in model.setAppActive(phase == .active) }`.
+- On iOS 15, `.refreshable` only works on a `List`, so use `List` in place of `ScrollView` for pull to refresh.
 
 ## SwiftUI screen
 
@@ -832,14 +857,14 @@ flowchart TD
 
 Loads go memory, then disk, then network, as the cache policy allows. Every load runs through one state machine, and the list only ever changes by one published snapshot.
 
-PageKit includes a privacy manifest. It reads file dates for eviction, collects no data and does no tracking. It follows [semantic versioning](https://semver.org), and CI checks for accidental API breaks.
+PageKit includes a privacy manifest. It reads file dates for eviction, collects no data and does no tracking. It follows [semantic versioning](https://semver.org), and CI checks for accidental API breaks against the last tag.
 
 ## The name `PageKit`
 
 `PageKit` is both the module and a public enum inside it. In your code, `PageKit.clearAll()` refers to the enum, which is what you want. This has two side effects:
 
-- You can't write `PageKit.Paginator` to qualify a type with its module, because `PageKit` resolves to the enum. If another module in your app also has a `Paginator`, import it by name: `import class PageKit.Paginator`.
-- A module and a type with one name is legal, but it doesn't work with library evolution. Don't build PageKit with `BUILD_LIBRARY_FOR_DISTRIBUTION`. Add it as a source package.
+- You can't write `PageKit.Paginator` to qualify a type with its module, because `PageKit` resolves to the enum. If another module in your app also has a `Paginator`, import PageKit's by name: `import class PageKit.Paginator`. The keyword is `class` even though `Paginator` is an actor, as Swift has no `import actor`.
+- PageKit can't be built with library evolution. With `BUILD_LIBRARY_FOR_DISTRIBUTION` the build fails, because the generated interface's `PageKit.` prefixes resolve to the enum. So it can't ship as a binary XCFramework. Add it as a source package.
 
 ## Demo app
 

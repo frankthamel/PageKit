@@ -12,7 +12,7 @@ For anything larger than a small fix, open an issue first, so we can agree on th
 
 ## Getting set up
 
-Use Xcode 16.3 or later (Swift 6.1). The test suite's hang watchdog uses Swift Testing's `TestScoping`, so on Swift 6.0 a hung test would wait for ever. Then:
+PageKit itself needs Xcode 16 or later (Swift 6.0). To work on it, use Xcode 16.3 or later (Swift 6.1): the test suite's hang watchdog uses Swift Testing's `TestScoping`, so on Swift 6.0 a hung test would wait for ever. CI only runs Xcode 26.6 and 27.1, so anything older is untested. Then:
 
 ```sh
 git clone https://github.com/frankthamel/PageKit.git
@@ -28,7 +28,7 @@ swift build -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
 xcodebuild docbuild -scheme PageKit -destination 'generic/platform=macOS' OTHER_DOCC_FLAGS=--warnings-as-errors
 ```
 
-CI also builds for iOS, tvOS and watchOS, and checks for API breaks against the last tag.
+On Xcode 26.6 and 27.1, CI also builds for iOS, tvOS and watchOS. Tests run on macOS only. CI also checks for API breaks against the last tag.
 
 ## Project rules
 
