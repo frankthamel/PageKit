@@ -80,6 +80,19 @@ import Testing
         return held
     }
 
+    /// An environment that stops at queued write number `write`, counted from 1, until
+    /// `release` opens. A first page queues two writes: the discard, then the page.
+    private func holdingWrite(_ write: Int, entered: Gate, release: Gate) -> PaginatorEnvironment {
+        let writes = CallLog()
+        var held = environment
+        held.beforeDiskWrite = {
+            guard await writes.record() == write else { return }
+            await entered.open()
+            await release.wait()
+        }
+        return held
+    }
+
     // MARK: Opening a feed
 
     @Test func secondOpenServesFromMemoryWithoutCallingSource() async {
@@ -180,7 +193,67 @@ import Testing
         #expect(await diskPage(firstToken)?.items.first?.title == "new")
     }
 
-    @Test func unchangedFirstPageUpdatesTheNextTokenOfAOnePageChain() async {
+    @Test func sameIDsWithNoNextTokenReplacesALongerChain() async {
+        await seedChain(pages: 2)
+
+        let paginator = Paginator.testing(firstPageOnly(page(1, 2)), policy: .cacheThenNetwork, environment: environment)
+        await paginator.start()
+        let snapshot = await paginator.revalidated()
+        await paginator.waitForPendingWrites()
+
+        #expect(ids(snapshot) == [1, 2])
+        #expect(snapshot.state == .loaded(hasMore: false))
+        #expect(await diskPage(secondToken) == nil)
+        #expect(await manifest()?.tokens == [firstToken])
+    }
+
+    @Test func sameIDsWithAChangedNextTokenReplacesALongerChain() async {
+        await seedChain(pages: 2)
+        let source = firstPageOnly(page(1, 2, next: thirdToken))
+
+        let paginator = Paginator.testing(source, policy: .cacheThenNetwork, environment: environment)
+        await paginator.start()
+        let snapshot = await paginator.revalidated()
+        await paginator.waitForPendingWrites()
+
+        #expect(ids(snapshot) == [1, 2])
+        #expect(snapshot.state == .loaded(hasMore: true))
+        #expect(await diskPage(secondToken) == nil)
+        #expect(await paginator.nextToken == thirdToken)
+    }
+
+    @Test func aChangedNextTokenDropsANextPageStillLoading() async {
+        await seedChain(pages: 1)
+        let enteredNext = Gate()
+        let releaseNext = Gate()
+        let enteredFirst = Gate()
+        let releaseFirst = Gate()
+        let source = MockSource { [self] token in
+            if token.page == 1 {
+                await enteredFirst.open()
+                await releaseFirst.wait()
+                return page(1, 2, next: thirdToken)
+            }
+            await enteredNext.open()
+            await releaseNext.wait()
+            return page(3, 4)
+        }
+        let paginator = Paginator.testing(source, policy: .cacheThenNetwork, environment: environment)
+        await paginator.start()
+        await enteredFirst.wait()
+        let next = Task { await paginator.loadNextPage() }
+        await enteredNext.wait()
+
+        await releaseFirst.open()
+        _ = await paginator.revalidated()
+        await releaseNext.open()
+        await next.value
+
+        #expect(ids(await paginator.current()) == [1, 2])
+        #expect(await paginator.nextToken == thirdToken)
+    }
+
+    @Test func aNextTokenOnAOnePageChainThatHadNoneIsTakenUp() async {
         let ended = MockSource { _ in page(1, 2) }
         await seedChain(pages: 1, source: ended)
         let source = firstPageOnly(page(1, 2, next: secondToken))
@@ -253,6 +326,103 @@ import Testing
         #expect(ids(await paginator.current()) == [1, 2, 3, 4])
     }
 
+    @Test func failedRevalidationDoesNotTakeOverAFailedNextPage() async {
+        await seedChain(pages: 1)
+        let entered = Gate()
+        let release = Gate()
+        let nextCalls = CallLog()
+        let source = MockSource { [self] token in
+            guard token.page == 2 else {
+                await entered.open()
+                await release.wait()
+                throw serverFailure
+            }
+            if await nextCalls.record() <= RetryPolicy.default.maxAttempts { throw serverFailure }
+            return page(3, 4)
+        }
+        let paginator = Paginator.testing(source, policy: .cacheThenNetwork, environment: environment)
+        await paginator.start()
+        await entered.wait()
+        await paginator.loadNextPage()
+        await release.open()
+        _ = await paginator.first { $0.lastError != nil }
+
+        await paginator.retry()
+
+        #expect(ids(await paginator.current()) == [1, 2, 3, 4])
+        #expect(await nextCalls.count == RetryPolicy.default.maxAttempts + 1)
+    }
+
+    @Test func pageFromCacheKeepsAFailedRevalidationRetryable() async {
+        await seedChain(pages: 1)
+        await park(page(3, 4), as: secondToken)
+        let calls = CallLog()
+        let source = MockSource { [self] _ in
+            if await calls.record() <= RetryPolicy.default.maxAttempts { throw serverFailure }
+            return page(1, 2, next: secondToken)
+        }
+        let paginator = Paginator.testing(source, policy: .cacheThenNetwork, environment: environment)
+        await paginator.start()
+        _ = await paginator.first { $0.lastError != nil }
+        await paginator.loadNextPage()
+
+        await paginator.retry()
+
+        #expect(ids(await paginator.current()) == [1, 2, 3, 4])
+        #expect(await paginator.current().isStale == false)
+    }
+
+    @Test func pageFromTheNetworkEndsAFailedRevalidationsRetry() async {
+        await seedChain(pages: 1)
+        let firstCalls = CallLog()
+        let source = MockSource { [self] token in
+            guard token.page == 1 else { return page(3, 4) }
+            await firstCalls.record()
+            throw serverFailure
+        }
+        let paginator = Paginator.testing(source, policy: .cacheThenNetwork, environment: environment)
+        await paginator.start()
+        _ = await paginator.first { $0.lastError != nil }
+        await paginator.loadNextPage()
+        let callsSoFar = await firstCalls.count
+
+        await paginator.retry()
+
+        #expect(await firstCalls.count == callsSoFar)
+    }
+
+    @Test func cancelledNextPageCallerDoesNotStopRevalidation() async {
+        await seedChain(pages: 1)
+        let enteredFirst = Gate()
+        let releaseFirst = Gate()
+        let enteredNext = Gate()
+        let releaseNext = Gate()
+        let source = MockSource { [self] token in
+            guard token.page == 1 else {
+                await enteredNext.open()
+                await releaseNext.wait()
+                return page(3, 4)
+            }
+            await enteredFirst.open()
+            await releaseFirst.wait()
+            return page(1, 2, next: secondToken)
+        }
+        let paginator = Paginator.testing(source, policy: .cacheThenNetwork, environment: environment)
+        await paginator.start()
+        await enteredFirst.wait()
+        let next = Task { await paginator.loadNextPage() }
+        await enteredNext.wait()
+
+        next.cancel()
+        _ = await paginator.first { $0.state == .loaded(hasMore: true) }
+        await releaseFirst.open()
+        _ = await paginator.revalidated()
+        await releaseNext.open()
+        await next.value
+
+        #expect(ids(await paginator.current()) == [1, 2])
+    }
+
     @Test func offlineLaunchShowsDiskPages() async {
         await seedChain(pages: 2)
         environment.memory.removeAll()
@@ -290,6 +460,9 @@ import Testing
 
         #expect(ids(snapshot) == [1, 2])
         #expect(snapshot.state == .loaded(hasMore: true))
+        // Page 3 lies past the break, so it must not be served after a fresh page 2.
+        await paginator.waitForPendingWrites()
+        #expect(await diskPage(thirdToken) == nil)
     }
 
     @Test func missingFirstPageIsACacheMiss() async {
@@ -1055,6 +1228,69 @@ import Testing
         #expect(await calls.count == 1)
     }
 
+    // MARK: Writes and clearing
+
+    @Test func diskWritesLandInTheOrderTheyWereQueued() async {
+        let entered = Gate()
+        let release = Gate()
+        let order = OrderLog()
+        let held = holdingWrite(2, entered: entered, release: release)
+        let hold = held.beforeDiskWrite
+        var logged = held
+        logged.beforeDiskWrite = {
+            await hold()
+            await order.note()
+        }
+        let paginator = Paginator.testing(threePages(), policy: .cacheThenNetwork, environment: logged)
+        await paginator.start()
+        await entered.wait()
+
+        await paginator.loadNextPage()
+        // Time for a later write to overtake, if it could. Passing never depends on this.
+        for _ in 0..<2_000 { await Task.yield() }
+        let overtaken = await order.count > 1
+        await release.open()
+        await paginator.waitForPendingWrites()
+
+        #expect(!overtaken)
+        #expect(await manifest()?.tokens == [firstToken, secondToken])
+    }
+
+    private enum Clearing: CaseIterable {
+        case feed, everything
+    }
+
+    @Test(arguments: Clearing.allCases) private func writeQueuedBeforeAClearIsDropped(clearing: Clearing) async {
+        let entered = Gate()
+        let release = Gate()
+        let held = holdingWrite(2, entered: entered, release: release)
+        let paginator = Paginator.testing(threePages(), policy: .cacheThenNetwork, environment: held)
+        await paginator.start()
+        await entered.wait()
+
+        switch clearing {
+        case .feed: await PageKit.clear(feedID: "test", stores: [environment.disk], memory: environment.memory)
+        case .everything: await PageKit.clearAll(stores: [environment.disk], memory: environment.memory)
+        }
+        await release.open()
+        await paginator.waitForPendingWrites()
+
+        #expect(await environment.disk.storedFeeds().isEmpty)
+    }
+
+    @Test func writesAfterAClearLand() async {
+        let paginator = Paginator.testing(threePages(), policy: .cacheThenNetwork, environment: environment)
+        await paginator.start()
+        _ = await paginator.settled()
+        await paginator.waitForPendingWrites()
+        await PageKit.clear(feedID: "test", stores: [environment.disk], memory: environment.memory)
+
+        await paginator.loadNextPage()
+        await paginator.waitForPendingWrites()
+
+        #expect(await diskPage(secondToken) != nil)
+    }
+
     // MARK: Maintenance
 
     @Test(arguments: [CachePolicy.networkOnly, .cacheOnly, .networkFirst, .cacheThenNetwork])
@@ -1068,6 +1304,15 @@ import Testing
         await paginator.start()
 
         #expect(scheduled.value == 1)
+    }
+}
+
+/// Counts how many writes have got past their hold.
+private actor OrderLog {
+    private(set) var count = 0
+
+    func note() {
+        count += 1
     }
 }
 

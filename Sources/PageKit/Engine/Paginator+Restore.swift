@@ -67,6 +67,8 @@ extension Paginator {
             guard let page else { break }
             pages.append((token, page))
         }
+        // Nothing past a break can be reached by following the chain, so none of it may be served.
+        if pages.count < manifest.tokens.count { discardCachedPages(except: pages.map(\.token)) }
         guard pages.contains(where: { !$0.page.items.isEmpty }) else { return false }
 
         pages.forEach { append($0.page, token: $0.token) }
@@ -95,14 +97,17 @@ extension Paginator {
                   let failure = ErrorClassifier.classify(error) else { return }
             PageKitLog.logger.error("Revalidation failed: \(String(describing: failure))")
             lastError = failure
-            lastFailedOperation = .revalidate
+            // A next page that failed is what the footer is waiting on, so retry stays with it.
+            if case .failed = state {} else { lastFailedOperation = .revalidate }
             publish()
         }
     }
 
-    /// Takes in a fresh page 1: in place if it lists the same items, otherwise as a new list.
+    /// Takes in a fresh page 1: in place if it still leads into the same chain, otherwise
+    /// as a new list.
     private func adoptFirstPage(_ page: Page<Item, Token>, token: Token) {
-        guard hasSameItems(page, token: token) else {
+        let following = pageOrder.count > 1 ? pageOrder[1] : nextToken
+        guard hasSameItems(page, token: token), page.nextToken == following else {
             // A next page still loading belongs to the old chain.
             invalidateLoads()
             return apply(page, token: token, operation: .refresh, origin: .network)
@@ -110,7 +115,6 @@ extension Paginator {
         for item in page.items {
             if let index = indexByID[item.id] { items[index] = item }
         }
-        if pageOrder.count == 1 { nextToken = page.nextToken }
         persist(page, token: token)
         isStale = false
         lastError = nil
@@ -148,6 +152,7 @@ extension Paginator {
     /// Stores a page in memory and queues it for disk, with a manifest of the list as it is now.
     ///
     /// Page and manifest go together, so maintenance never finds a feed without a manifest.
+    /// The write is dropped if the feed is cleared before it lands.
     func persist(_ page: Page<Item, Token>, token: Token) {
         guard configuration.cachePolicy.usesCache else { return }
         environment.memory.store(page, for: PageKey(feedID: feedID, token: token), cost: cost(of: page))
@@ -160,8 +165,12 @@ extension Paginator {
             diskSizeLimit: configuration.diskSizeLimit,
             storage: configuration.storage
         )
+        let clearEpoch = environment.disk.clearEpoch(for: feedID)
         enqueueDiskWrite { [feedID, schemaVersion = configuration.schemaVersion] disk in
-            await disk.save(page, manifest: manifest, feedID: feedID, token: token, schemaVersion: schemaVersion)
+            await disk.save(
+                page, manifest: manifest, feedID: feedID, token: token,
+                schemaVersion: schemaVersion, clearEpoch: clearEpoch
+            )
         }
     }
 
@@ -185,9 +194,10 @@ extension Paginator {
     /// undo a newer one, so each write waits for the one before.
     private func enqueueDiskWrite(_ write: @escaping @Sendable (DiskPageStore) async -> Void) {
         let earlier = pendingWrite
-        pendingWrite = Task { [disk = environment.disk] in
+        pendingWrite = Task { [environment] in
             await earlier?.value
-            await write(disk)
+            await environment.beforeDiskWrite()
+            await write(environment.disk)
         }
     }
 

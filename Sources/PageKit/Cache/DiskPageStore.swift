@@ -23,6 +23,7 @@ actor DiskPageStore {
     private let root: URL
     private let now: @Sendable () -> Date
     private let fileManager = FileManager.default
+    private let clearEpochs = ClearEpochs()
 
     /// Creates a store.
     /// - Parameters:
@@ -109,7 +110,7 @@ actor DiskPageStore {
         return Page(items: stored.items, nextToken: stored.nextToken)
     }
 
-    /// Writes a page and returns its size in bytes, which the memory cache uses as its cost.
+    /// Writes a page and returns its size in bytes.
     @discardableResult
     func save<Item: Codable & Sendable, Token: PageToken>(
         _ page: Page<Item, Token>, feedID: String, token: Token, schemaVersion: Int
@@ -124,9 +125,15 @@ actor DiskPageStore {
     /// Maintenance deletes any folder with no manifest, so nothing may run between the
     /// two. The page goes first: a crash between them leaves a feed with no manifest,
     /// which is swept, rather than a manifest that promises a page it does not have.
+    ///
+    /// `clearEpoch` is the feed's ``clearEpoch(for:)`` from when the write was queued. If
+    /// the feed has been cleared since, nothing is written, so a queued write cannot bring
+    /// back data that the app was told is gone.
     func save<Item: Codable & Sendable, Token: PageToken>(
-        _ page: Page<Item, Token>, manifest: FeedManifest<Token>, feedID: String, token: Token, schemaVersion: Int
+        _ page: Page<Item, Token>, manifest: FeedManifest<Token>, feedID: String, token: Token,
+        schemaVersion: Int, clearEpoch: Int
     ) {
+        guard clearEpoch == self.clearEpoch(for: feedID) else { return }
         save(page, feedID: feedID, token: token, schemaVersion: schemaVersion)
         saveManifest(manifest, feedID: feedID)
     }
@@ -170,8 +177,17 @@ actor DiskPageStore {
 
     // MARK: Removal
 
-    /// Deletes everything stored for one feed.
+    /// A number that changes whenever `feedID` is cleared.
+    ///
+    /// It is `nonisolated` so that a paginator can note it at the moment it queues a
+    /// write, without waiting for this actor.
+    nonisolated func clearEpoch(for feedID: String) -> Int {
+        clearEpochs.value(for: feedID)
+    }
+
+    /// Deletes everything stored for one feed, and any write queued for it.
     func removeFeed(_ feedID: String) {
+        clearEpochs.bump(feedID)
         try? fileManager.removeItem(at: feedFolder(feedID))
     }
 
@@ -180,8 +196,9 @@ actor DiskPageStore {
         try? fileManager.removeItem(at: root.appendingPathComponent(name, isDirectory: true))
     }
 
-    /// Deletes every feed under this store's root.
+    /// Deletes every feed under this store's root, and any write queued for one.
     func removeAll() {
+        clearEpochs.bumpAll()
         try? fileManager.removeItem(at: root)
     }
 
@@ -249,5 +266,27 @@ actor DiskPageStore {
 
     private static func hex(_ digest: SHA256.Digest) -> String {
         digest.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// Counts how often each feed has been cleared.
+///
+/// `@unchecked Sendable` is safe because both counts are only touched while holding `lock`.
+private final class ClearEpochs: @unchecked Sendable {
+    private let lock = NSLock()
+    private var all = 0
+    private var byFeed: [String: Int] = [:]
+
+    /// Both counts only rise, so their sum changes on every clear that touches the feed.
+    func value(for feedID: String) -> Int {
+        lock.withLock { all + byFeed[feedID, default: 0] }
+    }
+
+    func bump(_ feedID: String) {
+        lock.withLock { byFeed[feedID, default: 0] += 1 }
+    }
+
+    func bumpAll() {
+        lock.withLock { all += 1 }
     }
 }

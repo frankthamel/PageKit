@@ -16,6 +16,8 @@ struct PaginatorEnvironment: Sendable {
     var scheduleMaintenance: @Sendable () -> Void = {}
     /// Runs before every disk read, so tests can hold a read part way through a restore.
     var beforeDiskRead: @Sendable () async -> Void = {}
+    /// Runs before every queued disk write lands, so tests can hold a write back.
+    var beforeDiskWrite: @Sendable () async -> Void = {}
 
     /// The real caches, clock and sleep.
     /// - Parameters:

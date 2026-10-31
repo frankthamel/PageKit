@@ -99,8 +99,8 @@ extension Paginator {
             result = .failure(error)
         }
 
-        // The world may have changed while waiting. A newer generation owns the state now.
-        guard generation == self.generation else { return }
+        // The world may have changed while waiting. Whoever replaced this load owns the state now.
+        guard generation == self.generation, load == latestLoad else { return }
         guard !Task.isCancelled else { return restoreState() }
         switch result {
         case .success(let resolved):
@@ -162,7 +162,7 @@ extension Paginator {
         guard load == latestLoad, generation == self.generation, state.isLoading else { return }
         inFlight[token]?.cancel()
         inFlight[token] = nil
-        self.generation += 1
+        latestLoad += 1
         restoreState()
     }
 
@@ -187,7 +187,8 @@ extension Paginator {
         nextToken = page.nextToken
         if origin == .network { persist(page, token: token) }
         lastError = nil
-        lastFailedOperation = nil
+        // A cached page says nothing about the network, so a failed revalidation still stands.
+        if origin == .network || lastFailedOperation != .revalidate { lastFailedOperation = nil }
         state = settledState
         publish()
     }

@@ -32,9 +32,11 @@ public actor Paginator<Source: PageSource> {
     /// Goes up whenever running loads stop counting, so their late results can be dropped.
     ///
     /// Invariant: any path that changes `state` during a load must bump this, or that
-    /// load will overwrite the change when it finishes.
+    /// load will overwrite the change when it finishes. Ending just one load retires its
+    /// number in `latestLoad` instead, so revalidation, which is not a load, carries on.
     var generation = 0
-    /// Numbers each load, so a late cancellation cannot end a newer load.
+    /// Numbers each load. Only the load holding this number may finish, so a late
+    /// cancellation cannot end a newer load.
     var latestLoad = 0
     /// Requests under way, so that two callers for one page share one request.
     var inFlight: [Token: Task<Page<Item, Token>, Error>] = [:]
