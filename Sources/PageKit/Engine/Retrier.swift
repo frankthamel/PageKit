@@ -28,7 +28,7 @@ struct Retrier: Sendable {
                 guard let failure = ErrorClassifier.classify(error) else { throw CancellationError() }
                 attempt += 1
                 guard failure.isRetryable, attempt < attempts else { throw failure }
-                PageKitLog.logger.debug("Retrying: \(String(describing: failure), privacy: .private)")
+                PageKitLog.logger.debug("Attempt \(attempt) failed, retrying: \(String(describing: failure), privacy: .private)")
                 try await sleep(wait(after: failure, attempt: attempt - 1))
             }
         }

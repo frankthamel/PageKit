@@ -61,6 +61,34 @@ import Testing
         #expect(await FeedSeeding.hasManifest(caches, feedID: "a"))
     }
 
+    @Test func clearMemoryCacheEmptiesTheSharedCache() {
+        let feedID = "PageKitClearingTests-\(UUID().uuidString)"
+        remember(.shared, feedID: feedID)
+
+        PageKit.clearMemoryCache()
+
+        #expect(MemoryPageCache.shared.keyCount(for: feedID) == 0)
+    }
+
+    @Test func maintenanceJudgesAgeByTheRealClockByDefault() async {
+        let (caches, durable, _) = makeStores()
+        await FeedSeeding.seed(caches, feedID: "expired", updatedAt: Date(timeIntervalSince1970: 0))
+
+        await PageKit.performMaintenance(caches: caches, durable: durable)
+
+        #expect(await FeedSeeding.hasManifest(caches, feedID: "expired") == false)
+    }
+
+    @Test func scheduledMaintenanceWaitsWithARealSleepByDefault() async {
+        let runs = Counter()
+
+        await PageKit.scheduleMaintenanceOnce(
+            gate: OnceFlag(), priority: .medium, delayNanoseconds: 0, perform: { await runs.add(1) }
+        )?.value
+
+        #expect(await runs.value == 1)
+    }
+
     @Test func performMaintenanceSweepsCachesBySizeAndDurableByAgeOnly() async {
         let (caches, durable, _) = makeStores()
         let now = Date(timeIntervalSince1970: 10_000_000)

@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 
+#if compiler(>=6.1)
 /// Ends the whole test run if one test takes too long, so a hang fails instead of stalling.
 ///
 /// Swift Testing's `.timeLimit` is not enough. It only cancels the test, and then waits for
@@ -34,6 +35,11 @@ struct TestWatchdog: TestTrait, SuiteTrait, TestScoping {
         exit(EXIT_FAILURE)
     }
 }
+#else
+/// Does nothing on Swift 6.0, which has no `TestScoping`. A hang there stalls until the CI
+/// job's timeout ends it.
+struct TestWatchdog: TestTrait, SuiteTrait {}
+#endif
 
 extension Trait where Self == TestWatchdog {
     /// Ends the run if a test in this suite hangs. Every suite carries it.

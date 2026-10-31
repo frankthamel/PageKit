@@ -988,6 +988,12 @@ import Testing
         #expect(environment.memory === MemoryPageCache.shared)
     }
 
+    @Test func liveSleepReturnsAfterAZeroWait() async throws {
+        let environment = PaginatorEnvironment.live(configuration: .testing, connectivity: FakeConnectivity())
+
+        try await environment.sleep(0)
+    }
+
     @Test func serverSuppliedDelaysCannotOverflowTheLiveSleep() {
         #expect(PaginatorEnvironment.nanoseconds(for: 1.5) == 1_500_000_000)
         #expect(PaginatorEnvironment.nanoseconds(for: -5) == 0)

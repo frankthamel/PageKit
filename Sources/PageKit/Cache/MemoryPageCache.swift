@@ -5,6 +5,10 @@ import Foundation
 /// Memory is a speed-up, never the source of truth: NSCache may drop any entry
 /// at any moment, so a miss here falls through to disk and then the network.
 ///
+/// Once it holds entries, a cache must stay alive for the rest of the process. If its last
+/// reference goes during a memory-pressure eviction, NSCache is destroyed inside its own
+/// eviction callback, and the process aborts on a recursive lock. ``shared`` never goes away.
+///
 /// `@unchecked Sendable` is safe because NSCache is internally synchronised
 /// and `keys` is only touched while holding `lock`. `lock` also makes
 /// the check-then-set in `raiseCostLimit` atomic.

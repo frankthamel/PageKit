@@ -1,3 +1,4 @@
+#if compiler(>=6.1)
 import Testing
 
 @Suite(.watchdog) struct TestWatchdogTests {
@@ -19,3 +20,4 @@ import Testing
         #expect(await expired.count == 0)
     }
 }
+#endif
