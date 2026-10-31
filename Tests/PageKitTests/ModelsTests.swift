@@ -9,6 +9,16 @@ private struct SearchToken: PageToken {
 }
 
 @Suite(.watchdog) struct ModelsTests {
+    @Test func snapshotsAndPagesCompareByValue() {
+        let snapshot = PaginationSnapshot(
+            items: [TestItem(id: 1)], state: .loaded(hasMore: true), isStale: false, isOffline: false, lastError: nil
+        )
+        #expect(snapshot == snapshot)
+        #expect(snapshot != .initial)
+        #expect(Page(items: [1], nextToken: 2) == Page(items: [1], nextToken: 2))
+        #expect(Page(items: [1], nextToken: 2) != Page(items: [1], nextToken: nil))
+    }
+
     @Test func indexTokenOffsetIsZeroBased() {
         #expect(IndexToken(page: 3, size: 20).offset == 40)
         #expect(IndexToken.first(size: 20).offset == 0)

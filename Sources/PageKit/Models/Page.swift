@@ -21,3 +21,4 @@ public struct Page<Item, Token> {
 
 extension Page: Sendable where Item: Sendable, Token: Sendable {}
 extension Page: Codable where Item: Codable, Token: Codable {}
+extension Page: Equatable where Item: Equatable, Token: Equatable {}

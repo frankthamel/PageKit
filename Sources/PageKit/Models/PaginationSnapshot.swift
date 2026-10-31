@@ -20,7 +20,14 @@ public struct PaginationSnapshot<Item: Identifiable & Sendable>: Sendable {
         PaginationSnapshot(items: [], state: .idle, isStale: false, isOffline: false, lastError: nil)
     }
 
-    init(items: [Item], state: PaginationState, isStale: Bool, isOffline: Bool, lastError: PaginationError?) {
+    /// Creates a snapshot, such as for a preview or a test of your own view.
+    /// - Parameters:
+    ///   - items: The items to show, in order, with no duplicate IDs.
+    ///   - state: Where the list is in its loading life cycle.
+    ///   - isStale: Whether the network has yet to confirm the items.
+    ///   - isOffline: Whether the device has no connection.
+    ///   - lastError: The most recent error that did not replace the items on screen.
+    public init(items: [Item], state: PaginationState, isStale: Bool, isOffline: Bool, lastError: PaginationError?) {
         self.items = items
         self.state = state
         self.isStale = isStale
@@ -28,3 +35,5 @@ public struct PaginationSnapshot<Item: Identifiable & Sendable>: Sendable {
         self.lastError = lastError
     }
 }
+
+extension PaginationSnapshot: Equatable where Item: Equatable {}
