@@ -62,21 +62,32 @@ extension Paginator {
 
     /// Fetches a page through the shared in-flight table, with retries.
     ///
-    /// A second caller for the same token waits for the first caller's request.
-    /// Cancelling a caller here does not cancel the request, because others may share
-    /// it. `load(_:)` adds that for the one caller that owns the list's state, so work
-    /// calling `fetch` directly, such as read-ahead, is not affected.
-    func fetch(_ token: Source.Token) async throws -> Page<Source.Item, Source.Token> {
-        if let existing = inFlight[token] {
-            return try await existing.value
-        }
+    /// A second caller for the same token shares the first caller's request and its
+    /// clear epoch. Cancelling a caller here does not cancel the request, because others
+    /// may share it.
+    ///
+    /// `load(_:)` adds that for the one caller that owns the list's state, even when it
+    /// is sharing. So cancelling a load that joined a read-ahead ends the read-ahead's
+    /// request too. The read-ahead parks nothing and stops, and the list is unaffected.
+    func fetch(_ token: Source.Token) async throws -> (page: Page<Source.Item, Source.Token>, clearEpoch: Int) {
+        let request = request(token)
+        return (try await request.task.value, request.clearEpoch)
+    }
+
+    /// The request for `token`, joining the one under way if there is one.
+    ///
+    /// A request leaves the table when it ends, before anyone waiting on it resumes. One
+    /// that was cancelled has already left, and a newer request may hold its place.
+    func request(_ token: Token) -> InFlightRequest {
+        if let existing = inFlight[token] { return existing }
+        let clearEpoch = environment.disk.clearEpoch(for: source.feedID)
         let task = Task { [source, retrier] in
-            try await retrier.run { try await source.loadPage(token) }
+            defer { if !Task.isCancelled { inFlight[token] = nil } }
+            return try await retrier.run { try await source.loadPage(token) }
         }
-        inFlight[token] = task
-        // Invalidating loads may have put a newer request under this token. Leave that one be.
-        defer { if inFlight[token] == task { inFlight[token] = nil } }
-        return try await task.value
+        let request = InFlightRequest(task: task, clearEpoch: clearEpoch)
+        inFlight[token] = request
+        return request
     }
 
     /// Runs one load from its loading state through to its final snapshot.
@@ -136,8 +147,8 @@ extension Paginator {
     }
 
     private func fetchFromNetwork(_ token: Token) async throws -> (page: Page<Item, Token>, origin: PageOrigin) {
-        let clearEpoch = environment.disk.clearEpoch(for: source.feedID)
-        return (try await fetch(token), .network(clearEpoch: clearEpoch))
+        let fetched = try await fetch(token)
+        return (fetched.page, .network(clearEpoch: fetched.clearEpoch))
     }
 
     /// Under `.networkFirst`, shows what the cache holds after a failed load.
@@ -167,7 +178,7 @@ extension Paginator {
     /// only acts if `load` is still the load under way, whose result can no longer apply.
     func abandonLoad(_ load: Int, generation: Int, token: Token) {
         guard load == latestLoad, generation == self.generation, state.isLoading else { return }
-        inFlight[token]?.cancel()
+        inFlight[token]?.task.cancel()
         inFlight[token] = nil
         latestLoad += 1
         restoreState()
@@ -183,9 +194,11 @@ extension Paginator {
     /// Takes in a page that belongs to the current list, as one snapshot.
     ///
     /// A page that replaces the list makes every later cached page part of the old chain,
-    /// so they go, but only now that the new page has arrived.
+    /// so they go, but only now that the new page has arrived. Anything still running
+    /// belongs to the old chain too.
     func apply(_ page: Page<Item, Token>, token: Token, operation: LoadOperation, origin: PageOrigin) {
         if operation != .nextPage {
+            invalidateLoads()
             removeAllItems()
             discardCachedPages(except: [token])
             isStale = false
@@ -203,6 +216,7 @@ extension Paginator {
         lastError = nil
         state = settledState
         publish()
+        scheduleReadAhead()
     }
 
     /// What the state is once the list holds what it should.
@@ -220,6 +234,8 @@ extension Paginator {
     /// Appends the items whose IDs are new. The token is recorded even if none are,
     /// so a page of only duplicates still moves the list forward.
     func append(_ page: Page<Item, Token>, token: Token) {
+        let countBefore = items.count
+        defer { newestPageWasBlank = items.count == countBefore }
         pageOrder.append(token)
         for item in page.items where indexByID[item.id] == nil {
             indexByID[item.id] = items.count

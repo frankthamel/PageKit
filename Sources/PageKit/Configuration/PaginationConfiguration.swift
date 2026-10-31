@@ -8,7 +8,9 @@ public struct PaginationConfiguration: Sendable {
     /// Start loading the next page when this many items remain.
     public var prefetchDistance = 5
 
-    /// How many pages to read ahead in the background.
+    /// How many pages to fetch ahead of the list and park in the cache, so the next
+    /// load needs no network. Zero turns this off. It only applies to
+    /// ``CachePolicy/cacheThenNetwork``, the one policy that uses both to serve a next page.
     public var lookaheadPages = 1
 
     /// The memory cache budget, in bytes.
@@ -29,8 +31,8 @@ public struct PaginationConfiguration: Sendable {
     /// Where pages are kept on disk.
     public var storage = DiskStorage.caches
 
-    /// Whether to read ahead on expensive (cellular or hotspot) connections.
-    /// Off by default to protect the user's data plan.
+    /// Whether to read ahead on expensive (cellular or hotspot) connections and in
+    /// Low Data Mode. Off by default to protect the user's data plan.
     public var allowsReadAheadOnExpensiveNetwork = false
 
     /// Creates a configuration with every default.

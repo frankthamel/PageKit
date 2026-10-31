@@ -6,12 +6,19 @@ extension CachePolicy {
 
     /// Whether a next page is looked for in the cache before the network.
     var readsCacheFirst: Bool { self == .cacheOnly || self == .cacheThenNetwork }
+
+    /// Whether a page fetched ahead of the list would ever be served. That takes a network
+    /// to fetch it and a next load that looks in the cache first. Under `.networkFirst` the
+    /// next load fetches the page again, and may be led to different pages after it.
+    var readsAhead: Bool { self == .cacheThenNetwork }
 }
 
 /// The cache half of the engine.
 ///
 /// One invariant keeps it simple: every page in the cache belongs to the current chain.
 /// Replacing the list deletes the later pages, so a cached page is always safe to append.
+/// The manifest lists only the pages on screen. A parked page is reached from
+/// `lastNextToken`, one page at a time, as any cached next page is.
 extension Paginator {
     private var feedID: String { source.feedID }
 
@@ -88,18 +95,18 @@ extension Paginator {
     func revalidateFirstPage() async {
         let generation = self.generation
         let token = source.firstToken
-        let clearEpoch = environment.disk.clearEpoch(for: feedID)
         do {
-            let page = try await fetch(token)
+            let fetched = try await fetch(token)
             guard generation == self.generation, !Task.isCancelled else { return }
-            adoptFirstPage(page, token: token, clearEpoch: clearEpoch)
+            adoptFirstPage(fetched.page, token: token, clearEpoch: fetched.clearEpoch)
         } catch {
             guard generation == self.generation, !Task.isCancelled,
                   let failure = ErrorClassifier.classify(error) else { return }
             PageKitLog.logger.error("Revalidation failed: \(String(describing: failure))")
             lastError = failure
-            // A next page that failed is what the footer is waiting on, so retry stays with it.
-            if case .failed = state {} else { lastFailedOperation = .revalidate }
+            // A next page that failed is what the footer is waiting on, so retry stays with
+            // it, even while it is being retried: a cancelled retry goes back to `.failed`.
+            if case .failed = stateBeforeLoad {} else { lastFailedOperation = .revalidate }
             publish()
         }
     }
@@ -109,8 +116,6 @@ extension Paginator {
     private func adoptFirstPage(_ page: Page<Item, Token>, token: Token, clearEpoch: Int) {
         let following = pageOrder.count > 1 ? pageOrder[1] : nextToken
         guard hasSameItems(page, token: token), page.nextToken == following else {
-            // A next page still loading belongs to the old chain.
-            invalidateLoads()
             return apply(page, token: token, operation: .refresh, origin: .network(clearEpoch: clearEpoch))
         }
         for item in page.items {
@@ -122,6 +127,7 @@ extension Paginator {
         if lastFailedOperation == .revalidate { lastFailedOperation = nil }
         if case .loaded = state { state = settledState }
         publish()
+        scheduleReadAhead()
     }
 
     /// Whether `page` has the IDs of the items now shown from `token`, in the same order.
@@ -133,6 +139,8 @@ extension Paginator {
 
     /// Reads a page from memory, then disk, and promotes a disk page to memory.
     ///
+    /// A page being discarded is gone from memory at once but from disk only when its
+    /// turn in the write queue comes, so a disk read waits for that first.
     /// A load that is overtaken meanwhile gets `nil`, because its page may no longer
     /// belong to the chain and must not go back into memory.
     func readPage(_ token: Token) async -> Page<Item, Token>? {
@@ -142,6 +150,7 @@ extension Paginator {
 
         let generation = self.generation
         let clearEpoch = environment.disk.clearEpoch(for: feedID)
+        await pendingDiscard?.value
         await environment.beforeDiskRead()
         let page: Page<Item, Token>? = await environment.disk.page(
             feedID: feedID, token: token, schemaVersion: configuration.schemaVersion
@@ -184,7 +193,7 @@ extension Paginator {
     func discardCachedPages(except tokens: [Token]) {
         guard configuration.cachePolicy.usesCache else { return }
         environment.memory.removeFeed(feedID)
-        enqueueDiskWrite { [feedID] disk in
+        pendingDiscard = enqueueDiskWrite { [feedID] disk in
             await disk.removePages(feedID: feedID, except: tokens)
         }
     }
@@ -198,13 +207,16 @@ extension Paginator {
     ///
     /// Tasks on an actor have no guaranteed order, and an old manifest landing last would
     /// undo a newer one, so each write waits for the one before.
-    private func enqueueDiskWrite(_ write: @escaping @Sendable (DiskPageStore) async -> Void) {
+    @discardableResult
+    private func enqueueDiskWrite(_ write: @escaping @Sendable (DiskPageStore) async -> Void) -> Task<Void, Never> {
         let earlier = pendingWrite
-        pendingWrite = Task { [environment] in
+        let task = Task { [environment] in
             await earlier?.value
             await environment.beforeDiskWrite()
             await write(environment.disk)
         }
+        pendingWrite = task
+        return task
     }
 
     /// A page's size as JSON, which is what the memory cache budgets by.

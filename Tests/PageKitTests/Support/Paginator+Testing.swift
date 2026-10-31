@@ -53,6 +53,33 @@ extension Paginator {
             _ = self
             await gate.open()
         }
-        return try await fetch(token)
+        return try await fetch(token).page
+    }
+
+    /// Calls `retry` from inside the actor, and opens `gate` once that call has suspended.
+    func retry(openingOnSuspend gate: Gate) async {
+        Task { [self] in
+            _ = self
+            await gate.open()
+        }
+        await retry()
+    }
+
+    /// Reports `id` appearing `times` times, all in one turn of the actor.
+    func itemAppeared(id: Source.Item.ID, times: Int) {
+        for _ in 0..<times { itemAppeared(id: id) }
+    }
+
+    /// Reports `id` appearing and cancels before the load that queues can run.
+    func itemAppearedThenCancel(id: Source.Item.ID) async {
+        itemAppeared(id: id)
+        let task = prefetchTask
+        cancel()
+        await task?.value
+    }
+
+    /// Waits for the read-ahead under way, if there is one.
+    func waitForReadAhead() async {
+        await readAheadTask?.value
     }
 }

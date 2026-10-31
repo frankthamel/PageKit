@@ -353,6 +353,47 @@ import Testing
         #expect(await nextCalls.count == RetryPolicy.default.maxAttempts + 1)
     }
 
+    @Test func failedRevalidationDoesNotTakeOverARetriedNextPageThatIsCancelled() async {
+        await seedChain(pages: 1)
+        let firstEntered = Gate(), firstRelease = Gate()
+        let retryEntered = Gate(), retryRelease = Gate()
+        let nextCalls = CallLog()
+        let attempts = RetryPolicy.default.maxAttempts
+        let source = MockSource { [self] token in
+            guard token.page == 2 else {
+                await firstEntered.open()
+                await firstRelease.wait()
+                throw serverFailure
+            }
+            let call = await nextCalls.record()
+            if call <= attempts { throw serverFailure }
+            if call == attempts + 1 {
+                await retryEntered.open()
+                await retryRelease.wait()
+            }
+            return page(3, 4)
+        }
+        let paginator = Paginator.testing(source, policy: .cacheThenNetwork, environment: environment)
+        await paginator.start()
+        await firstEntered.wait()
+        await paginator.loadNextPage()
+
+        // The revalidation fails while the next page's retry is loading.
+        let retrying = Task { await paginator.retry() }
+        await retryEntered.wait()
+        await firstRelease.open()
+        _ = await paginator.first { $0.lastError != nil }
+
+        retrying.cancel()
+        _ = await paginator.first { !$0.state.isLoading }
+        await retryRelease.open()
+        await retrying.value
+
+        await paginator.retry()
+
+        #expect(ids(await paginator.current()) == [1, 2, 3, 4])
+    }
+
     @Test func pageFromCacheKeepsAFailedRevalidationRetryable() async {
         await seedChain(pages: 1)
         await park(page(3, 4), as: secondToken)
@@ -1353,6 +1394,33 @@ import Testing
         await paginator.waitForPendingWrites()
 
         #expect(ids(snapshot) == fresh)
+        await expectFeedIsGone()
+    }
+
+    /// A second `retry()` joins the first one's request, whose epoch is from before the clear.
+    @Test func retryJoiningARequestFromBeforeAClearIsNotCached() async {
+        await seedChain(pages: 1)
+        let entered = Gate()
+        let release = Gate()
+        let calls = CallLog()
+        let source = MockSource { [self] _ in
+            if await calls.record() <= RetryPolicy.default.maxAttempts { throw serverFailure }
+            await entered.open()
+            await release.wait()
+            return page(1, 2, next: secondToken)
+        }
+        let paginator = Paginator.testing(source, policy: .cacheThenNetwork, environment: environment)
+        await paginator.start()
+        _ = await paginator.first { $0.lastError != nil }
+
+        let before = Task { await paginator.retry() }
+        await entered.wait()
+        await clearFeed()
+        await paginator.retry(openingOnSuspend: release)
+        await before.value
+        await paginator.waitForPendingWrites()
+
+        #expect(await calls.count == RetryPolicy.default.maxAttempts + 1)
         await expectFeedIsGone()
     }
 

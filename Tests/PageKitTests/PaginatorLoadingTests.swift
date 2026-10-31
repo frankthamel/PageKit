@@ -125,7 +125,7 @@ import Testing
         let paginator = Paginator.testing(source)
         let token = source.firstToken
 
-        let first = Task { try await paginator.fetch(token) }
+        let first = Task { try await paginator.fetch(token).page }
         await entered.wait()
         let second = try await paginator.fetch(token, openingOnSuspend: release)
 

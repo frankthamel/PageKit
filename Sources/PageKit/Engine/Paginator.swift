@@ -13,6 +13,14 @@ public actor Paginator<Source: PageSource> {
     typealias Item = Source.Item
     typealias Token = Source.Token
 
+    /// A request under way, which any number of callers can share.
+    struct InFlightRequest {
+        let task: Task<Page<Item, Token>, Error>
+        /// The feed's clear epoch from before the request, which every caller persists
+        /// with. A caller that joins after a clear must not take the page for a new one.
+        let clearEpoch: Int
+    }
+
     let source: Source
     let configuration: PaginationConfiguration
     let environment: PaginatorEnvironment
@@ -34,14 +42,24 @@ public actor Paginator<Source: PageSource> {
     /// Invariant: any path that changes `state` during a load must bump this, or that
     /// load will overwrite the change when it finishes. Ending just one load retires its
     /// number in `latestLoad` instead, so revalidation, which is not a load, carries on.
+    /// Read-ahead stops on the same signal, so a page from an old chain is never parked.
     var generation = 0
     /// Numbers each load. Only the load holding this number may finish, so a late
     /// cancellation cannot end a newer load.
     var latestLoad = 0
     /// Requests under way, so that two callers for one page share one request.
-    var inFlight: [Token: Task<Page<Item, Token>, Error>] = [:]
+    var inFlight: [Token: InFlightRequest] = [:]
     /// What ``retry()`` repeats.
     var lastFailedOperation: LoadOperation?
+    /// A next-page load the distance trigger has queued but that has not begun.
+    var prefetchTask: Task<Void, Never>?
+    /// The read-ahead under way. There is at most one.
+    var readAheadTask: Task<Void, Never>?
+    /// Set by ``setAppActive(_:)``. Nothing is prefetched while it is `false`.
+    var isAppActive = true
+    /// Whether the newest page added no items. Scrolling cannot move past such a page,
+    /// so the distance trigger leaves it to an explicit ``loadNextPage()``.
+    var newestPageWasBlank = false
 
     var state = PaginationState.idle {
         didSet { if !state.isLoading { stateBeforeLoad = state } }
@@ -54,6 +72,8 @@ public actor Paginator<Source: PageSource> {
     var startTask: Task<Void, Never>?
     /// The most recent disk write. Each one waits for the one before, so they land in order.
     var pendingWrite: Task<Void, Never>?
+    /// The most recent queued deletion of cached pages.
+    var pendingDiscard: Task<Void, Never>?
 
     /// Creates a paginator. Nothing loads until ``start()``.
     /// - Parameters:
@@ -100,17 +120,20 @@ public actor Paginator<Source: PageSource> {
     public func cancel() {
         startTask?.cancel()
         startTask = nil
+        prefetchTask?.cancel()
+        prefetchTask = nil
         invalidateLoads()
         guard state.isLoading else { return }
         state = stateBeforeLoad
         publish()
     }
 
-    /// Cancels every request and makes sure no running load can apply its result.
+    /// Cancels every request and makes sure no running load or read-ahead can use its result.
     func invalidateLoads() {
         generation += 1
-        inFlight.values.forEach { $0.cancel() }
+        inFlight.values.forEach { $0.task.cancel() }
         inFlight.removeAll()
+        readAheadTask = nil
     }
 
     /// Sends the current state to every observer, as one snapshot.
