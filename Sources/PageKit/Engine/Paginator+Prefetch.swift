@@ -127,7 +127,7 @@ extension Paginator {
             return try await page(from: request)
         } catch {
             if let failure = ErrorClassifier.classify(error) {
-                PageKitLog.logger.error("Read-ahead failed: \(String(describing: failure))")
+                PageKitLog.logger.error("Read-ahead failed: \(String(describing: failure), privacy: .private)")
             }
             return nil
         }

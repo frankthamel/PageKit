@@ -72,7 +72,8 @@ public struct URLSessionPageSource<
         guard (200...299).contains(http.statusCode) else {
             throw PageKitHTTPError(status: http.statusCode, retryAfter: Self.retryAfter(in: http))
         }
-        return map(try makeDecoder().decode(Response.self, from: data), token)
+        let decoded = try PageKitLog.interval("Decode") { try makeDecoder().decode(Response.self, from: data) }
+        return map(decoded, token)
     }
 
     /// The seconds from a numeric `Retry-After` header, or `nil` if it is missing, negative or not a number.

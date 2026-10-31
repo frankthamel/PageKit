@@ -99,7 +99,8 @@ actor DiskPageStore {
         feedID: String, token: Token, schemaVersion: Int
     ) -> Page<Item, Token>? {
         guard let url = pageURL(feedID, token), let data = try? Data(contentsOf: url) else { return nil }
-        guard let stored = try? decoder.decode(StoredPage<Item, Token>.self, from: data) else {
+        let decoded = PageKitLog.interval("Decode") { try? decoder.decode(StoredPage<Item, Token>.self, from: data) }
+        guard let stored = decoded else {
             try? fileManager.removeItem(at: url)
             return nil
         }
@@ -242,13 +243,16 @@ actor DiskPageStore {
     @discardableResult
     private func write<Value: Encodable>(_ value: Value, to url: URL, feedID: String) -> Int {
         do {
-            let data = try JSONEncoder().encode(value)
-            try prepareRoot()
-            try fileManager.createDirectory(at: feedFolder(feedID), withIntermediateDirectories: true)
-            try data.write(to: url, options: writeOptions)
-            return data.count
+            return try PageKitLog.interval("Disk Write") {
+                let data = try JSONEncoder().encode(value)
+                try prepareRoot()
+                try fileManager.createDirectory(at: feedFolder(feedID), withIntermediateDirectories: true)
+                try data.write(to: url, options: writeOptions)
+                return data.count
+            }
         } catch {
-            PageKitLog.logger.error("Disk write failed: \(error.localizedDescription, privacy: .public)")
+            // A file error's description names the path, and so the feed.
+            PageKitLog.logger.error("Disk write failed: \(error.localizedDescription, privacy: .private)")
             return 0
         }
     }
@@ -264,7 +268,7 @@ actor DiskPageStore {
         do {
             try rootURL.setResourceValues(values)
         } catch {
-            PageKitLog.logger.error("Backup exclusion failed: \(error.localizedDescription, privacy: .public)")
+            PageKitLog.logger.error("Backup exclusion failed: \(error.localizedDescription, privacy: .private)")
         }
     }
 

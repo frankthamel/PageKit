@@ -104,7 +104,7 @@ extension Paginator {
             guard generation == self.generation, !Task.isCancelled,
                   let failure = ErrorClassifier.classify(error) else { return }
             noteFailure(failure)
-            PageKitLog.logger.error("Revalidation failed: \(String(describing: failure))")
+            PageKitLog.logger.error("Revalidation failed: \(String(describing: failure), privacy: .private)")
             lastError = failure
             // A next page that failed is what the footer is waiting on, so retry stays with
             // it, even while it is being retried: a cancelled retry goes back to `.failed`.

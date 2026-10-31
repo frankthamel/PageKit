@@ -82,7 +82,12 @@ extension Paginator {
         if let existing = inFlight[token] { return existing }
         let clearEpoch = environment.disk.clearEpoch(for: source.feedID)
         let task = Task { [source, retrier] in
-            defer { if !Task.isCancelled { inFlight[token] = nil } }
+            let signposter = PageKitLog.signposter
+            let interval = signposter.beginInterval("Fetch", id: signposter.makeSignpostID())
+            defer {
+                signposter.endInterval("Fetch", interval)
+                if !Task.isCancelled { inFlight[token] = nil }
+            }
             return try await retrier.run { try await source.loadPage(token) }
         }
         let request = InFlightRequest(task: task, clearEpoch: clearEpoch, editsBefore: localEdits.count)
@@ -199,27 +204,29 @@ extension Paginator {
     /// so they go, but only now that the new page has arrived. Anything still running
     /// belongs to the old chain too.
     func apply(_ page: Page<Item, Token>, token: Token, operation: LoadOperation, origin: PageOrigin) {
-        if operation != .nextPage {
-            invalidateLoads()
-            removeAllItems()
-            discardCachedPages(except: [token])
-            isStale = false
+        PageKitLog.interval("Snapshot Apply") {
+            if operation != .nextPage {
+                invalidateLoads()
+                removeAllItems()
+                discardCachedPages(except: [token])
+                isStale = false
+            }
+            append(page, token: token)
+            nextToken = page.nextToken
+            switch origin {
+            case .network(let clearEpoch):
+                persist(page, token: token, clearEpoch: clearEpoch)
+                lastFailedOperation = nil
+                noteNetworkAnswered()
+            case .cache:
+                // A cached page says nothing about the network, so a failed revalidation still stands.
+                if lastFailedOperation != .revalidate { lastFailedOperation = nil }
+            }
+            lastError = nil
+            state = settledState
+            publish()
+            scheduleReadAhead()
         }
-        append(page, token: token)
-        nextToken = page.nextToken
-        switch origin {
-        case .network(let clearEpoch):
-            persist(page, token: token, clearEpoch: clearEpoch)
-            lastFailedOperation = nil
-            noteNetworkAnswered()
-        case .cache:
-            // A cached page says nothing about the network, so a failed revalidation still stands.
-            if lastFailedOperation != .revalidate { lastFailedOperation = nil }
-        }
-        lastError = nil
-        state = settledState
-        publish()
-        scheduleReadAhead()
     }
 
     /// What the state is once the list holds what it should.
@@ -254,7 +261,7 @@ extension Paginator {
     /// Records a failure. Items on screen are never removed, so `.failed(_, isFirstPage: true)`
     /// always means there is nothing to show, and a failed refresh does not block scrolling.
     private func fail(_ operation: LoadOperation, with error: PaginationError) {
-        PageKitLog.logger.error("Page load failed: \(String(describing: error))")
+        PageKitLog.logger.error("Page load failed: \(String(describing: error), privacy: .private)")
         lastFailedOperation = operation
         if items.isEmpty {
             state = .failed(error, isFirstPage: true)

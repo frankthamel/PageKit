@@ -10,7 +10,7 @@ let package = Package(
     ],
     dependencies: [],   // zero third-party code, by design
     targets: [
-        .target(name: "PageKit"),
+        .target(name: "PageKit", resources: [.copy("PrivacyInfo.xcprivacy")]),
         .testTarget(name: "PageKitTests", dependencies: ["PageKit"]),
     ]
 )
