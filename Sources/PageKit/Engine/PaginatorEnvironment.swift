@@ -11,6 +11,11 @@ struct PaginatorEnvironment: Sendable {
     let connectivity: any ConnectivityMonitoring
     let sleep: Sleep
     let now: @Sendable () -> Date
+    /// Starts the once-per-launch disk sweep. Does nothing unless set, so that injected
+    /// environments stay away from the real caches folders.
+    var scheduleMaintenance: @Sendable () -> Void = {}
+    /// Runs before every disk read, so tests can hold a read part way through a restore.
+    var beforeDiskRead: @Sendable () async -> Void = {}
 
     /// The real caches, clock and sleep.
     /// - Parameters:
@@ -24,7 +29,8 @@ struct PaginatorEnvironment: Sendable {
             disk: .shared(for: configuration.storage),
             connectivity: connectivity,
             sleep: { try await Task.sleep(nanoseconds: nanoseconds(for: $0)) },
-            now: Date.init
+            now: Date.init,
+            scheduleMaintenance: { PageKit.scheduleMaintenanceOnce() }
         )
     }
 

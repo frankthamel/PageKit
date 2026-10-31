@@ -50,6 +50,8 @@ public actor Paginator<Source: PageSource> {
     var isOffline = false
     var lastError: PaginationError?
     var startTask: Task<Void, Never>?
+    /// The most recent disk write. Each one waits for the one before, so they land in order.
+    var pendingWrite: Task<Void, Never>?
 
     /// Creates a paginator. Nothing loads until ``start()``.
     /// - Parameters:
@@ -87,6 +89,7 @@ public actor Paginator<Source: PageSource> {
     /// Calling it again after the feed has opened does nothing.
     public func start() {
         guard state == .idle, startTask == nil else { return }
+        environment.scheduleMaintenance()
         startTask = Task { await open() }
     }
 

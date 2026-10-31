@@ -10,6 +10,13 @@ extension PaginationConfiguration {
         configuration.retry = RetryPolicy(baseDelay: 0, maxDelay: 0)
         return configuration
     }
+
+    /// `.testing`, on the given cache policy.
+    static func testing(_ policy: CachePolicy) -> PaginationConfiguration {
+        var configuration = PaginationConfiguration.testing
+        configuration.cachePolicy = policy
+        return configuration
+    }
 }
 
 extension PaginatorEnvironment {
@@ -18,7 +25,8 @@ extension PaginatorEnvironment {
     static func testing(
         memory: MemoryPageCache = MemoryPageCache(costLimit: 1_000_000),
         connectivity: any ConnectivityMonitoring = FakeConnectivity(),
-        sleep: @escaping Sleep = { _ in try Task.checkCancellation() }
+        sleep: @escaping Sleep = { _ in try Task.checkCancellation() },
+        now: @escaping @Sendable () -> Date = Date.init
     ) -> PaginatorEnvironment {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("PageKitTests-\(UUID().uuidString)", isDirectory: true)
@@ -27,7 +35,7 @@ extension PaginatorEnvironment {
             disk: DiskPageStore(root: root),
             connectivity: connectivity,
             sleep: sleep,
-            now: Date.init
+            now: now
         )
     }
 }

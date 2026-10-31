@@ -2,7 +2,7 @@
 
 /// An index-based source whose pages come from a closure the test supplies.
 struct MockSource: PageSource {
-    let feedID = "test"
+    var feedID = "test"
     let firstToken = IndexToken.first(size: 2)
     let handler: @Sendable (IndexToken) async throws -> Page<TestItem, IndexToken>
 

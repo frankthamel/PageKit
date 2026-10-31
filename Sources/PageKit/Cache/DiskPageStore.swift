@@ -119,6 +119,18 @@ actor DiskPageStore {
         return write(stored, to: url, feedID: feedID)
     }
 
+    /// Writes a page and the manifest that lists it, in one turn of this actor.
+    ///
+    /// Maintenance deletes any folder with no manifest, so nothing may run between the
+    /// two. The page goes first: a crash between them leaves a feed with no manifest,
+    /// which is swept, rather than a manifest that promises a page it does not have.
+    func save<Item: Codable & Sendable, Token: PageToken>(
+        _ page: Page<Item, Token>, manifest: FeedManifest<Token>, feedID: String, token: Token, schemaVersion: Int
+    ) {
+        save(page, feedID: feedID, token: token, schemaVersion: schemaVersion)
+        saveManifest(manifest, feedID: feedID)
+    }
+
     /// Deletes every page of a feed except those for `tokens`. The manifest stays.
     func removePages<Token: PageToken>(feedID: String, except tokens: [Token]) {
         let kept = Set(tokens.compactMap { pageURL(feedID, $0)?.lastPathComponent })

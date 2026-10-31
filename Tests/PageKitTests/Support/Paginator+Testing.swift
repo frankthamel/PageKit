@@ -6,6 +6,16 @@ extension Paginator {
         Paginator(source: source, configuration: .testing, environment: .testing())
     }
 
+    /// A paginator on `policy`, sharing `environment`'s caches with any other made from it.
+    static func testing(_ source: Source, policy: CachePolicy, environment: PaginatorEnvironment) -> Paginator {
+        Paginator(source: source, configuration: .testing(policy), environment: environment)
+    }
+
+    /// The first snapshot that shows items the network has confirmed.
+    nonisolated func revalidated() async -> PaginationSnapshot<Source.Item> {
+        await first { !$0.items.isEmpty && !$0.isStale && !$0.state.isLoading }
+    }
+
     /// The current snapshot.
     nonisolated func current() async -> PaginationSnapshot<Source.Item> {
         await first { _ in true }

@@ -6,7 +6,7 @@ public struct PaginationSnapshot<Item: Identifiable & Sendable>: Sendable {
     /// Where the list is in its loading life cycle.
     public let state: PaginationState
 
-    /// `true` while cached items are shown and a refresh is still in flight.
+    /// `true` while cached items are shown that the network has not yet confirmed.
     public let isStale: Bool
 
     /// `true` when the device has no connection. Independent of `state`.

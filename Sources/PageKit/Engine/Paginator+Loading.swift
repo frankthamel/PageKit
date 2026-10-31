@@ -3,6 +3,13 @@ enum LoadOperation: Sendable {
     case firstPage
     case nextPage
     case refresh
+    case revalidate
+}
+
+/// Where a load's page came from. Only a page from the network has anything to save.
+enum PageOrigin: Sendable {
+    case network
+    case cache
 }
 
 extension Paginator {
@@ -17,14 +24,22 @@ extension Paginator {
     /// On success the new page replaces the list. On failure every item stays: the
     /// state returns to `.loaded`, and the snapshot's `lastError` is set. With no items
     /// to keep, a failure is `.failed(_, isFirstPage: true)` instead.
+    ///
+    /// Under ``CachePolicy/cacheOnly`` this does nothing, because that policy never uses
+    /// the network.
     public func refresh() async {
+        guard configuration.cachePolicy != .cacheOnly else { return }
         await load(.refresh)
     }
 
     /// Repeats the load that last failed. Does nothing if none has, or while loading.
     public func retry() async {
         guard !state.isLoading, let lastFailedOperation else { return }
-        await load(lastFailedOperation)
+        if lastFailedOperation == .revalidate {
+            await revalidateFirstPage()
+        } else {
+            await load(lastFailedOperation)
+        }
     }
 
     /// The first load after `start()`.
@@ -36,7 +51,11 @@ extension Paginator {
         guard !Task.isCancelled else { return }
         startTask = nil
         guard state == .idle else { return }
-        await load(.firstPage)
+        if configuration.cachePolicy.readsCacheFirst {
+            await openFromCache()
+        } else {
+            await load(.firstPage)
+        }
     }
 
     /// Fetches a page through the shared in-flight table, with retries.
@@ -59,7 +78,7 @@ extension Paginator {
     }
 
     /// Runs one load from its loading state through to its final snapshot.
-    private func load(_ operation: LoadOperation) async {
+    func load(_ operation: LoadOperation) async {
         guard !Task.isCancelled else { return }
         if operation == .refresh { invalidateLoads() }
         guard let token = operation == .nextPage ? nextToken : source.firstToken else { return }
@@ -69,10 +88,10 @@ extension Paginator {
         latestLoad += 1
         let load = latestLoad
         let generation = self.generation
-        let result: Result<Page<Item, Token>, Error>
+        let result: Result<(page: Page<Item, Token>, origin: PageOrigin), Error>
         do {
             result = .success(try await withTaskCancellationHandler {
-                try await fetch(token)
+                try await resolvePage(token, for: operation)
             } onCancel: { [self] in
                 Task { await abandonLoad(load, generation: generation, token: token) }
             })
@@ -84,11 +103,54 @@ extension Paginator {
         guard generation == self.generation else { return }
         guard !Task.isCancelled else { return restoreState() }
         switch result {
-        case .success(let page):
-            apply(page, token: token, operation: operation)
+        case .success(let resolved):
+            apply(resolved.page, token: token, operation: operation, origin: resolved.origin)
         case .failure(let error):
             guard let failure = ErrorClassifier.classify(error) else { return restoreState() }
+            let recovered = await recoverFromCache(operation, token: token, failure: failure)
+            guard generation == self.generation, !recovered else { return }
+            guard !Task.isCancelled else { return restoreState() }
             fail(operation, with: failure)
+        }
+    }
+
+    /// Finds a load's page where its cache policy says to look first.
+    ///
+    /// Under `.cacheOnly` a miss is the end of the chain. An empty last page says so,
+    /// and takes the same path as any other page.
+    private func resolvePage(
+        _ token: Token, for operation: LoadOperation
+    ) async throws -> (page: Page<Item, Token>, origin: PageOrigin) {
+        guard operation == .nextPage, configuration.cachePolicy.readsCacheFirst else {
+            return (try await fetch(token), .network)
+        }
+        let generation = self.generation
+        if let cached = await readPage(token) { return (cached, .cache) }
+        guard generation == self.generation, !Task.isCancelled else { throw CancellationError() }
+        guard configuration.cachePolicy != .cacheOnly else {
+            return (Page(items: [], nextToken: nil), .cache)
+        }
+        return (try await fetch(token), .network)
+    }
+
+    /// Under `.networkFirst`, shows what the cache holds after a failed load.
+    ///
+    /// A refresh never comes here: it keeps what is on screen, and there is nothing to
+    /// gain from a retried first page with items already showing.
+    /// - Returns: `true` if the load has been dealt with.
+    private func recoverFromCache(_ operation: LoadOperation, token: Token, failure: PaginationError) async -> Bool {
+        guard configuration.cachePolicy == .networkFirst else { return false }
+        switch operation {
+        case .firstPage where items.isEmpty:
+            lastFailedOperation = .firstPage
+            return await restoreFromCache(reporting: failure)
+        case .nextPage:
+            guard let cached = await readPage(token) else { return false }
+            isStale = true
+            apply(cached, token: token, operation: .nextPage, origin: .cache)
+            return true
+        case .firstPage, .refresh, .revalidate:
+            return false
         }
     }
 
@@ -107,19 +169,32 @@ extension Paginator {
     private func loadingState(for operation: LoadOperation) -> PaginationState {
         switch operation {
         case .nextPage: .loadingNextPage
-        case .firstPage, .refresh: items.isEmpty ? .loadingFirstPage : .refreshing
+        case .firstPage, .refresh, .revalidate: items.isEmpty ? .loadingFirstPage : .refreshing
         }
     }
 
     /// Takes in a page that belongs to the current list, as one snapshot.
-    private func apply(_ page: Page<Item, Token>, token: Token, operation: LoadOperation) {
-        if operation != .nextPage { removeAllItems() }
+    ///
+    /// A page that replaces the list makes every later cached page part of the old chain,
+    /// so they go, but only now that the new page has arrived.
+    func apply(_ page: Page<Item, Token>, token: Token, operation: LoadOperation, origin: PageOrigin) {
+        if operation != .nextPage {
+            removeAllItems()
+            discardCachedPages(except: [token])
+            isStale = false
+        }
         append(page, token: token)
         nextToken = page.nextToken
+        if origin == .network { persist(page, token: token) }
         lastError = nil
         lastFailedOperation = nil
-        state = items.isEmpty ? .empty : .loaded(hasMore: nextToken != nil)
+        state = settledState
         publish()
+    }
+
+    /// What the state is once the list holds what it should.
+    var settledState: PaginationState {
+        items.isEmpty ? .empty : .loaded(hasMore: nextToken != nil)
     }
 
     private func removeAllItems() {
@@ -131,7 +206,7 @@ extension Paginator {
 
     /// Appends the items whose IDs are new. The token is recorded even if none are,
     /// so a page of only duplicates still moves the list forward.
-    private func append(_ page: Page<Item, Token>, token: Token) {
+    func append(_ page: Page<Item, Token>, token: Token) {
         pageOrder.append(token)
         for item in page.items where indexByID[item.id] == nil {
             indexByID[item.id] = items.count
