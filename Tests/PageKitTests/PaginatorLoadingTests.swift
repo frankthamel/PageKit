@@ -386,6 +386,66 @@ import Testing
         #expect(snapshot.state == .loaded(hasMore: false))
     }
 
+    @Test func refreshDuringARefreshRestarts() async {
+        let calls = CallLog()
+        let cancelledRequests = CallLog()
+        let entered = Gate()
+        let release = Gate()
+        let paginator = Paginator.testing(MockSource { token in
+            switch await calls.record() {
+            case 1: return page(1, next: token.next)
+            case 2:
+                await entered.open()
+                await release.wait()
+                if Task.isCancelled { await cancelledRequests.record() }
+                return page(8)
+            default: return page(9)
+            }
+        })
+        await paginator.start()
+        _ = await paginator.settled()
+
+        let first = Task { await paginator.refresh() }
+        await entered.wait()
+        await paginator.refresh()
+        await release.open()
+        await first.value
+
+        let snapshot = await paginator.current()
+        #expect(ids(snapshot) == [9])
+        #expect(snapshot.state == .loaded(hasMore: false))
+        #expect(await calls.count == 3)
+        #expect(await cancelledRequests.count == 1)
+    }
+
+    @Test func staleFailureAfterRefreshIsDiscarded() async {
+        let firstPageCalls = CallLog()
+        let entered = Gate()
+        let release = Gate()
+        let paginator = Paginator.testing(MockSource { token in
+            if token.page == 1 {
+                await firstPageCalls.record()
+                return page(1, next: token.next)
+            }
+            await entered.open()
+            await release.wait()
+            throw PageKitHTTPError(status: 404)
+        })
+        await paginator.start()
+        _ = await paginator.settled()
+
+        let stale = Task { await paginator.loadNextPage() }
+        await entered.wait()
+        await paginator.refresh()
+        await release.open()
+        await stale.value
+
+        let snapshot = await paginator.current()
+        #expect(snapshot.state == .loaded(hasMore: true))
+        #expect(snapshot.lastError == nil)
+        #expect(await paginator.lastFailedOperation == nil)
+    }
+
     // MARK: Failures and retry
 
     @Test func failedNextPageKeepsItems() async {
@@ -501,6 +561,29 @@ import Testing
 
         #expect(await paginator.current().lastError == nil)
         #expect(await paginator.lastFailedOperation == nil)
+    }
+
+    @Test func lastErrorSurvivesALaterNextPageFailure() async {
+        let calls = CallLog()
+        let paginator = Paginator.testing(MockSource { token in
+            switch await calls.record() {
+            case 2: throw PageKitHTTPError(status: 404)
+            case 3: throw PageKitHTTPError(status: 403)
+            default: return page(1, next: token.next)
+            }
+        })
+        await paginator.start()
+        _ = await paginator.settled()
+        await paginator.refresh()
+
+        await paginator.loadNextPage()
+
+        let failed = await paginator.current()
+        #expect(failed.state == .failed(.client(status: 403), isFirstPage: false))
+        #expect(failed.lastError == .client(status: 404))
+
+        await paginator.retry()
+        #expect(await paginator.current().lastError == nil)
     }
 
     // MARK: Snapshots
@@ -679,12 +762,14 @@ import Testing
     }
 
     @Test func cancelledCallerRestoresTheStateAndDropsThePage() async {
+        let cancelledRequests = CallLog()
         let entered = Gate()
         let release = Gate()
         let paginator = Paginator.testing(MockSource { token in
             guard token.page == 2 else { return page(1, next: token.next) }
             await entered.open()
             await release.wait()
+            if Task.isCancelled { await cancelledRequests.record() }
             return page(2)
         })
         await paginator.start()
@@ -693,12 +778,187 @@ import Testing
         let load = Task { await paginator.loadNextPage() }
         await entered.wait()
         load.cancel()
+
+        // The source is still held at the gate, so this restore did not wait for it.
+        let restored = await paginator.first { $0.state == .loaded(hasMore: true) }
+        #expect(restored.items.map(\.id) == [1])
+
         await release.open()
+        await load.value
+        #expect(await cancelledRequests.count == 1)
+        #expect(ids(await paginator.current()) == [1])
+        #expect(await paginator.inFlight.isEmpty)
+    }
+
+    @Test func cancelledCallerStopsRetryBackoff() async {
+        let calls = CallLog()
+        let backingOff = Gate()
+        let wake = Gate()
+        let environment = PaginatorEnvironment.testing(sleep: { _ in
+            await backingOff.open()
+            await withTaskCancellationHandler {
+                await wake.wait()
+            } onCancel: {
+                Task { await wake.open() }
+            }
+            try Task.checkCancellation()
+        })
+        let source = MockSource { _ in
+            await calls.record()
+            throw PageKitHTTPError(status: 429, retryAfter: 3600)
+        }
+        let paginator = Paginator(source: source, configuration: .testing, environment: environment)
+
+        let load = Task { await paginator.refresh() }
+        await backingOff.wait()
+        load.cancel()
         await load.value
 
         let snapshot = await paginator.current()
-        #expect(snapshot.state == .loaded(hasMore: true))
-        #expect(ids(snapshot) == [1])
+        #expect(snapshot.state == .idle)
+        #expect(snapshot.lastError == nil)
+        #expect(await calls.count == 1)
+    }
+
+    @Test func callerCancelledBeforeTheLoadDoesNothing() async {
+        let calls = CallLog()
+        let paginator = Paginator.testing(threePages(calls: calls))
+        await paginator.start()
+        _ = await paginator.settled()
+        let stream = paginator.snapshots()
+
+        for operation in [paginator.loadNextPage, paginator.refresh] {
+            await Task {
+                withUnsafeCurrentTask { $0?.cancel() }
+                await operation()
+            }.value
+        }
+        await paginator.loadNextPage()
+        let seen = await collect(stream) { $0.state == .loadingNextPage }
+
+        #expect(seen.map(\.state) == [.loaded(hasMore: true), .loadingNextPage])
+        #expect(await calls.count == 2)
+    }
+
+    @Test func abandonedLoadDoesNotDisturbTheLoadAfterIt() async {
+        let calls = CallLog()
+        let abandonedEntered = Gate(), nextEntered = Gate()
+        let abandonedRelease = Gate(), nextRelease = Gate()
+        let paginator = Paginator.testing(MockSource { token in
+            switch await calls.record() {
+            case 1: return page(1, next: token.next)
+            case 2:
+                await abandonedEntered.open()
+                await abandonedRelease.wait()   // Ignores cancellation.
+            default:
+                await nextEntered.open()
+                await nextRelease.wait()
+            }
+            return page(2)
+        })
+        await paginator.start()
+        _ = await paginator.settled()
+
+        let abandoned = Task { await paginator.loadNextPage() }
+        await abandonedEntered.wait()
+        abandoned.cancel()
+        _ = await paginator.first { $0.state == .loaded(hasMore: true) }
+
+        let next = Task { await paginator.loadNextPage() }
+        await nextEntered.wait()
+        await abandonedRelease.open()
+        await abandoned.value
+        #expect(await paginator.current().state == .loadingNextPage)
+
+        await nextRelease.open()
+        await next.value
+        #expect(ids(await paginator.current()) == [1, 2])
+    }
+
+    @Test func lateCancellationDoesNotEndANewerLoad() async {
+        let entered = Gate()
+        let release = Gate()
+        let source = MockSource { token in
+            guard token.page == 2 else { return page(1, next: token.next) }
+            await entered.open()
+            await release.wait()
+            return page(2)
+        }
+        let paginator = Paginator.testing(source)
+        await paginator.start()
+        _ = await paginator.settled()
+        let finishedLoad = await paginator.latestLoad
+        let generation = await paginator.generation
+
+        let load = Task { await paginator.loadNextPage() }
+        await entered.wait()
+        await paginator.abandonLoad(finishedLoad, generation: generation, token: source.firstToken)
+        #expect(await paginator.current().state == .loadingNextPage)
+
+        await release.open()
+        await load.value
+        #expect(ids(await paginator.current()) == [1, 2])
+    }
+
+    @Test func lateCancellationAfterTheLoadFinishedChangesNothing() async {
+        let source = threePages()
+        let paginator = Paginator.testing(source)
+        await paginator.start()
+        _ = await paginator.settled()
+        let generation = await paginator.generation
+
+        await paginator.abandonLoad(await paginator.latestLoad, generation: generation, token: source.firstToken)
+
+        #expect(await paginator.generation == generation)
+    }
+
+    @Test(arguments: [CancellationError() as any Error, URLError(.cancelled)])
+    func startWorksAgainAfterFirstLoadIsCancelled(thrown: any Error) async {
+        let calls = CallLog()
+        let paginator = Paginator.testing(MockSource { token in
+            if await calls.record() == 1 { throw thrown }
+            return page(1, next: token.next)
+        })
+        let stream = paginator.snapshots()
+
+        await paginator.start()
+        _ = await collect(stream) { $0.state == .loadingFirstPage }
+        _ = await collect(stream) { $0.state == .idle }
+        await paginator.start()
+
+        #expect(ids(await paginator.settled()) == [1])
+    }
+
+    @Test func startWorksAgainAfterACancelledRefreshSupersededIt() async {
+        let calls = CallLog()
+        let startEntered = Gate(), refreshEntered = Gate()
+        let release = Gate()
+        let paginator = Paginator.testing(MockSource { token in
+            switch await calls.record() {
+            case 1:
+                await startEntered.open()
+                await release.wait()    // Ignores cancellation, and outlasts the restart.
+            case 2:
+                await refreshEntered.open()
+                await release.wait()
+            default:
+                break
+            }
+            return page(1, next: token.next)
+        })
+
+        await paginator.start()
+        await startEntered.wait()
+        let refresh = Task { await paginator.refresh() }
+        await refreshEntered.wait()
+        refresh.cancel()
+        _ = await paginator.first { $0.state == .idle }
+
+        await paginator.start()
+        #expect(ids(await paginator.settled()) == [1])
+
+        await release.open()
+        await refresh.value
     }
 
     // MARK: Set-up

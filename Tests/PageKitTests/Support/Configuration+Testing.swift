@@ -17,7 +17,8 @@ extension PaginatorEnvironment {
     /// that still honours cancellation, as `Task.sleep` does.
     static func testing(
         memory: MemoryPageCache = MemoryPageCache(costLimit: 1_000_000),
-        connectivity: any ConnectivityMonitoring = FakeConnectivity()
+        connectivity: any ConnectivityMonitoring = FakeConnectivity(),
+        sleep: @escaping Sleep = { _ in try Task.checkCancellation() }
     ) -> PaginatorEnvironment {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("PageKitTests-\(UUID().uuidString)", isDirectory: true)
@@ -25,7 +26,7 @@ extension PaginatorEnvironment {
             memory: memory,
             disk: DiskPageStore(root: root),
             connectivity: connectivity,
-            sleep: { _ in try Task.checkCancellation() },
+            sleep: sleep,
             now: Date.init
         )
     }

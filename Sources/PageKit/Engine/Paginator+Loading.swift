@@ -15,7 +15,8 @@ extension Paginator {
     /// Reloads from the first page.
     ///
     /// On success the new page replaces the list. On failure every item stays: the
-    /// state returns to `.loaded`, and the snapshot's `lastError` is set.
+    /// state returns to `.loaded`, and the snapshot's `lastError` is set. With no items
+    /// to keep, a failure is `.failed(_, isFirstPage: true)` instead.
     public func refresh() async {
         await load(.refresh)
     }
@@ -27,14 +28,23 @@ extension Paginator {
     }
 
     /// The first load after `start()`.
+    ///
+    /// `startTask` is cleared as soon as this task runs, not when it ends: from here on
+    /// `state` decides whether `start()` may run again, and the task's end can lag
+    /// behind a source that ignores cancellation.
     func open() async {
-        guard state == .idle, !Task.isCancelled else { return }
+        guard !Task.isCancelled else { return }
+        startTask = nil
+        guard state == .idle else { return }
         await load(.firstPage)
     }
 
     /// Fetches a page through the shared in-flight table, with retries.
     ///
     /// A second caller for the same token waits for the first caller's request.
+    /// Cancelling a caller here does not cancel the request, because others may share
+    /// it. `load(_:)` adds that for the one caller that owns the list's state, so work
+    /// calling `fetch` directly, such as read-ahead, is not affected.
     func fetch(_ token: Source.Token) async throws -> Page<Source.Item, Source.Token> {
         if let existing = inFlight[token] {
             return try await existing.value
@@ -50,15 +60,22 @@ extension Paginator {
 
     /// Runs one load from its loading state through to its final snapshot.
     private func load(_ operation: LoadOperation) async {
+        guard !Task.isCancelled else { return }
         if operation == .refresh { invalidateLoads() }
         guard let token = operation == .nextPage ? nextToken : source.firstToken else { return }
         state = loadingState(for: operation)
         publish()
 
+        latestLoad += 1
+        let load = latestLoad
         let generation = self.generation
         let result: Result<Page<Item, Token>, Error>
         do {
-            result = .success(try await fetch(token))
+            result = .success(try await withTaskCancellationHandler {
+                try await fetch(token)
+            } onCancel: { [self] in
+                Task { await abandonLoad(load, generation: generation, token: token) }
+            })
         } catch {
             result = .failure(error)
         }
@@ -73,6 +90,18 @@ extension Paginator {
             guard let failure = ErrorClassifier.classify(error) else { return restoreState() }
             fail(operation, with: failure)
         }
+    }
+
+    /// Ends a load whose caller was cancelled, without waiting for its request.
+    ///
+    /// This arrives by a separate task, so it can land after the load has finished. It
+    /// only acts if `load` is still the load under way, whose result can no longer apply.
+    func abandonLoad(_ load: Int, generation: Int, token: Token) {
+        guard load == latestLoad, generation == self.generation, state.isLoading else { return }
+        inFlight[token]?.cancel()
+        inFlight[token] = nil
+        self.generation += 1
+        restoreState()
     }
 
     private func loadingState(for operation: LoadOperation) -> PaginationState {

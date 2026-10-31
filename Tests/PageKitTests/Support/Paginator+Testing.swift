@@ -46,33 +46,3 @@ extension Paginator {
         return try await fetch(token)
     }
 }
-
-/// Counts calls into a source, safely across tasks.
-actor CallLog {
-    private(set) var count = 0
-
-    /// Records a call and returns its number, starting at 1.
-    @discardableResult
-    func record() -> Int {
-        count += 1
-        return count
-    }
-}
-
-/// Reads every snapshot from `stream` up to and including the one that satisfies `condition`.
-func collect<Item>(
-    _ stream: AsyncStream<PaginationSnapshot<Item>>,
-    until condition: (PaginationSnapshot<Item>) -> Bool
-) async -> [PaginationSnapshot<Item>] {
-    var seen: [PaginationSnapshot<Item>] = []
-    for await snapshot in stream {
-        seen.append(snapshot)
-        if condition(snapshot) { break }
-    }
-    return seen
-}
-
-/// A page of `TestItem`s with the given IDs.
-func page<Token>(_ ids: Int..., next: Token? = nil) -> Page<TestItem, Token> {
-    Page(items: ids.map { TestItem(id: $0) }, nextToken: next)
-}
