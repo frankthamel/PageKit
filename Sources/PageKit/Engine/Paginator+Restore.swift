@@ -55,6 +55,7 @@ extension Paginator {
     @discardableResult
     func restoreFromCache(reporting error: PaginationError? = nil) async -> Bool {
         let generation = self.generation
+        let clearEpoch = environment.disk.clearEpoch(for: feedID)
         await environment.beforeDiskRead()
         let manifest = await environment.disk.manifest(
             feedID: feedID, as: Token.self, schemaVersion: configuration.schemaVersion
@@ -79,6 +80,7 @@ extension Paginator {
         guard pages.contains(where: { !$0.page.items.isEmpty }) else { return false }
 
         pages.forEach { append($0.page, token: $0.token) }
+        listClearEpoch = clearEpoch
         nextToken = pages.last?.page.nextToken
         // Under `.cacheOnly` no network load is coming to confirm these items.
         isStale = configuration.cachePolicy != .cacheOnly
@@ -102,6 +104,7 @@ extension Paginator {
         } catch {
             guard generation == self.generation, !Task.isCancelled,
                   let failure = ErrorClassifier.classify(error) else { return }
+            noteFailure(failure)
             PageKitLog.logger.error("Revalidation failed: \(String(describing: failure))")
             lastError = failure
             // A next page that failed is what the footer is waiting on, so retry stays with
@@ -122,6 +125,7 @@ extension Paginator {
             if let index = indexByID[item.id] { items[index] = item }
         }
         persist(page, token: token, clearEpoch: clearEpoch)
+        noteNetworkAnswered()
         isStale = false
         lastError = nil
         if lastFailedOperation == .revalidate { lastFailedOperation = nil }

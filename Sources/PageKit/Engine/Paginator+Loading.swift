@@ -36,7 +36,7 @@ extension Paginator {
 
     /// Repeats the load that last failed. Does nothing if none has, or while loading.
     public func retry() async {
-        guard !state.isLoading, let lastFailedOperation else { return }
+        guard !state.isLoading, !isCancelled, let lastFailedOperation else { return }
         if lastFailedOperation == .revalidate {
             await revalidateFirstPage()
         } else {
@@ -71,7 +71,7 @@ extension Paginator {
     /// request too. The read-ahead parks nothing and stops, and the list is unaffected.
     func fetch(_ token: Source.Token) async throws -> (page: Page<Source.Item, Source.Token>, clearEpoch: Int) {
         let request = request(token)
-        return (try await request.task.value, request.clearEpoch)
+        return (try await page(from: request), request.clearEpoch)
     }
 
     /// The request for `token`, joining the one under way if there is one.
@@ -85,14 +85,14 @@ extension Paginator {
             defer { if !Task.isCancelled { inFlight[token] = nil } }
             return try await retrier.run { try await source.loadPage(token) }
         }
-        let request = InFlightRequest(task: task, clearEpoch: clearEpoch)
+        let request = InFlightRequest(task: task, clearEpoch: clearEpoch, editsBefore: localEdits.count)
         inFlight[token] = request
         return request
     }
 
     /// Runs one load from its loading state through to its final snapshot.
     func load(_ operation: LoadOperation) async {
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, !isCancelled else { return }
         if operation == .refresh { invalidateLoads() }
         guard let token = operation == .nextPage ? nextToken : source.firstToken else { return }
         state = loadingState(for: operation)
@@ -120,6 +120,7 @@ extension Paginator {
             apply(resolved.page, token: token, operation: operation, origin: resolved.origin)
         case .failure(let error):
             guard let failure = ErrorClassifier.classify(error) else { return restoreState() }
+            noteFailure(failure)
             let recovered = await recoverFromCache(operation, token: token, failure: failure)
             guard generation == self.generation, !recovered else { return }
             guard !Task.isCancelled else { return restoreState() }
@@ -207,8 +208,10 @@ extension Paginator {
         nextToken = page.nextToken
         switch origin {
         case .network(let clearEpoch):
+            if operation != .nextPage { listClearEpoch = clearEpoch }
             persist(page, token: token, clearEpoch: clearEpoch)
             lastFailedOperation = nil
+            noteNetworkAnswered()
         case .cache:
             // A cached page says nothing about the network, so a failed revalidation still stands.
             if lastFailedOperation != .revalidate { lastFailedOperation = nil }

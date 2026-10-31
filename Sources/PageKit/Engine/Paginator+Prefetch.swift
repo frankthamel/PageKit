@@ -16,8 +16,19 @@ extension Paginator {
     /// while the list is loading, failed or finished, or while the app is in the background.
     /// The same goes after a page with no items, which only ``loadNextPage()`` moves past.
     public func prefetch(upToIndex index: Int) {
-        guard canPrefetch, prefetchTask == nil,
-              index >= items.count - configuration.prefetchDistance else { return }
+        guard canPrefetch, index >= items.count - configuration.prefetchDistance else { return }
+        scheduleNextPage()
+    }
+
+    /// Loads the next page if every item of the newest one has been removed, as nothing
+    /// on screen would lead to it. A background app moves on with its next explicit load.
+    func loadNextPageIfNewestIsBlank() {
+        guard isAppActive, state.canLoadMore, newestPageWasBlank else { return }
+        scheduleNextPage()
+    }
+
+    private func scheduleNextPage() {
+        guard prefetchTask == nil else { return }
         // Cleared once it runs, because from there on `state` blocks a second load.
         prefetchTask = Task {
             guard !Task.isCancelled else { return }
@@ -41,15 +52,21 @@ extension Paginator {
 
     /// Whether the newest page shows no items, which scrolling cannot move past. The
     /// distance trigger leaves such a page to an explicit ``loadNextPage()``.
+    ///
+    /// Blank pages the user made are moved past when made, by `loadNextPageIfNewestIsBlank`.
     private var newestPageWasBlank: Bool {
         items.last.flatMap { pageByItem[$0.id] } != pageOrder.last
     }
 
-    /// Starts reading ahead of the list, unless a read-ahead is already running.
+    /// Starts reading ahead of the list, unless a read-ahead is already running or the
+    /// connection doesn't suit it. A better connection brings it back here.
     func scheduleReadAhead() {
         guard canPrefetch, configuration.cachePolicy.readsAhead, configuration.lookaheadPages > 0,
-              readAheadTask == nil, let nextToken else { return }
-        readAheadTask = Task { [generation] in await readAhead(from: nextToken, generation: generation) }
+              networkAllowsReadAhead, readAheadTask == nil, let nextToken else { return }
+        let clearEpoch = environment.disk.clearEpoch(for: source.feedID)
+        readAheadTask = Task { [generation] in
+            await readAhead(from: nextToken, generation: generation, clearEpoch: clearEpoch)
+        }
     }
 
     /// Follows the chain from `start`, parking up to `lookaheadPages` pages.
@@ -58,10 +75,11 @@ extension Paginator {
     /// A page is only parked once the page before it has named its token, so a wrong
     /// prediction can't put a page outside the chain into the cache. The walk ends at a
     /// clear, because a new request would take the new epoch and undo it.
-    /// - Parameter generation: The generation it was scheduled in, so it can be overtaken
-    ///   before it has begun.
-    private func readAhead(from start: Token, generation: Int) async {
-        let clearEpoch = environment.disk.clearEpoch(for: source.feedID)
+    /// - Parameters:
+    ///   - generation: The generation it was scheduled in, so it can be overtaken before
+    ///     it has begun.
+    ///   - clearEpoch: The feed's clear epoch when it was scheduled, for the same reason.
+    private func readAhead(from start: Token, generation: Int, clearEpoch: Int) async {
         defer {
             if generation == self.generation {
                 readAheadTask = nil
@@ -69,7 +87,6 @@ extension Paginator {
                 if nextToken != start { scheduleReadAhead() }
             }
         }
-        guard await networkAllowsReadAhead() else { return }
 
         var next: Token? = start
         var remaining = configuration.lookaheadPages
@@ -102,7 +119,7 @@ extension Paginator {
     /// The page a request brings, or `nil`. Cancellation is expected, so only a real failure is logged.
     private func readAheadPage(from request: InFlightRequest) async -> Page<Item, Token>? {
         do {
-            return try await request.task.value
+            return try await page(from: request)
         } catch {
             if let failure = ErrorClassifier.classify(error) {
                 PageKitLog.logger.error("Read-ahead failed: \(String(describing: failure))")
@@ -111,10 +128,9 @@ extension Paginator {
         }
     }
 
-    /// Whether the connection right now is one the app wants read-ahead to use.
-    private func networkAllowsReadAhead() async -> Bool {
-        guard let status = await environment.connectivity.updates().first(where: { _ in true }),
-              status.isOnline else { return false }
+    /// Whether the latest status is a connection the app wants read-ahead to use.
+    private var networkAllowsReadAhead: Bool {
+        guard let status = connectivityStatus, status.isOnline else { return false }
         return configuration.allowsReadAheadOnExpensiveNetwork || !(status.isExpensive || status.isConstrained)
     }
 }

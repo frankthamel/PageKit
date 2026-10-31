@@ -701,10 +701,9 @@ import Testing
         let stream = paginator.snapshots()
 
         await paginator.cancel()
-        await paginator.start()
-        let seen = await collect(stream) { $0.state == .loadingFirstPage }
+        let seen = await collect(stream) { _ in false }
 
-        #expect(seen.map(\.state) == [.idle, .loadingFirstPage])
+        #expect(seen.map(\.state) == [.idle])
     }
 
     @Test func cancelledNextPageRestoresTheStateBeforeTheLoad() async {

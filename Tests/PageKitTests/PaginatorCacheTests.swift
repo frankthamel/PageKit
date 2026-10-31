@@ -1028,24 +1028,6 @@ import Testing
         #expect(memoryPage(read == 3 ? secondToken : firstToken) == nil)
     }
 
-    @Test func startWorksAgainAfterACancelledRestore() async {
-        await seedChain(pages: 1)
-        environment.memory.removeAll()
-        let entered = Gate()
-        let release = Gate()
-        let source = firstPageOnly(page(1, 2, next: secondToken))
-        let held = holdingRead(1, entered: entered, release: release)
-        let paginator = Paginator.testing(source, policy: .cacheThenNetwork, environment: held)
-
-        await paginator.start()
-        await entered.wait()
-        await paginator.cancel()
-        await paginator.start()
-        await release.open()
-
-        #expect(ids(await paginator.revalidated()) == [1, 2])
-    }
-
     @Test func refreshDuringRestoreWins() async {
         await seedChain(pages: 1)
         environment.memory.removeAll()

@@ -36,7 +36,7 @@ private struct ChapterSource: PageSource {
     }
 }
 
-/// Reports a good connection only once `gate` opens, to hold a read-ahead at its first step.
+/// Reports a good connection only once `gate` opens, as a slow first status does.
 private struct HeldConnectivity: ConnectivityMonitoring {
     let gate: Gate
 
@@ -286,18 +286,41 @@ private struct HeldConnectivity: ConnectivityMonitoring {
     /// The list moves on while a read-ahead is running, so the new page's `scheduleReadAhead`
     /// finds that one still set. Whatever ends it must pick up from the new `nextToken`.
     @Test func readAheadOvertakenByALoadRunsAgainFromTheNewEnd() async {
+        let entered = Gate()
+        let release = Gate()
+        let reads = CallLog()
+        var environment = PaginatorEnvironment.testing()
+        // Read 1 finds no manifest. Read 2 is the read-ahead looking for page 2.
+        environment.beforeDiskRead = {
+            guard await reads.record() == 2 else { return }
+            await entered.open()
+            await release.wait()
+        }
+        let paginator = paginator(numbered(), environment: environment)
+        await paginator.start()
+        await entered.wait()
+
+        await paginator.loadNextPage()
+        await release.open()
+        await paginator.waitForReadAhead()
+        await paginator.waitForPendingWrites()
+
+        await expectParked(third, in: environment)
+    }
+
+    @Test func readAheadWaitsForTheFirstStatus() async {
         let connected = Gate()
         let environment = PaginatorEnvironment.testing(connectivity: HeldConnectivity(gate: connected))
         let paginator = paginator(numbered(), environment: environment)
         await paginator.start()
         _ = await paginator.settled()
+        #expect(await paginator.readAheadTask == nil)
 
-        await paginator.loadNextPage()
         await connected.open()
         await paginator.waitForReadAhead()
         await paginator.waitForPendingWrites()
 
-        await expectParked(third, in: environment)
+        await expectParked(second, in: environment)
     }
 
     @Test func readAheadParksPageInCacheNotInList() async {
@@ -902,6 +925,19 @@ private struct HeldConnectivity: ConnectivityMonitoring {
 
         #expect(await calls.count == 1)
         #expect(await paginator.readAheadTask == nil)
+    }
+
+    @Test func clearBeforeAReadAheadBeginsStopsIt() async {
+        let calls = CallLog()
+        let environment = PaginatorEnvironment.testing()
+        let paginator = paginator(numbered(calls: calls), environment: environment)
+        await paginator.setAppActive(false)
+        await opened(paginator)
+        await paginator.setAppActive(true)
+
+        await paginator.scheduleReadAheadThenClear()
+
+        #expect(await calls.count == 1)
     }
 
     @Test func readAheadRequestedBeforeAClearIsNotCached() async {

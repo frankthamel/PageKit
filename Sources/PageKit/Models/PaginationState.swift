@@ -19,7 +19,7 @@ public enum PaginationState: Equatable, Sendable {
     /// The list is reloading from the first page.
     case refreshing
 
-    /// The first page arrived with no items.
+    /// The first page arrived with no items, or the last item was removed.
     case empty
 
     /// A load failed. `isFirstPage` is `true` when there is nothing to show.

@@ -1,3 +1,4 @@
+import Foundation
 @testable import PageKit
 
 extension Paginator {
@@ -86,8 +87,43 @@ extension Paginator {
         await task?.value
     }
 
+    /// Schedules a read-ahead and clears the feed before its task can run, then waits for
+    /// that task. Blocking keeps the actor from running the task while the clear lands.
+    func scheduleReadAheadThenClear() async {
+        scheduleReadAhead()
+        let task = readAheadTask
+        clearBlockingTheActor()
+        await task?.value
+    }
+
+    private func clearBlockingTheActor() {
+        let cleared = DispatchSemaphore(value: 0)
+        Task.detached { [environment, feedID = source.feedID] in
+            await environment.disk.removeFeed(feedID)
+            cleared.signal()
+        }
+        cleared.wait()
+    }
+
     /// Waits until no read-ahead is running, including any that one leaves to follow it.
+    ///
+    /// The first status comes by way of the listener task, and may start a read-ahead.
     func waitForReadAhead() async {
+        while connectivityStatus == nil { await Task.yield() }
         while let task = readAheadTask { await task.value }
+    }
+
+    /// Reports a reconnect and cancels before the work it starts can run, then waits for it.
+    func reconnectThenCancel() async {
+        isOffline = true
+        connectivityChanged(to: .online)
+        let task = reconnectTask
+        cancel()
+        await task?.value
+    }
+
+    /// Waits for what the most recent reconnect started.
+    func waitForReconnect() async {
+        await reconnectTask?.value
     }
 }

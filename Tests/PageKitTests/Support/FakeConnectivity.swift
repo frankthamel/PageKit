@@ -7,6 +7,16 @@ final class FakeConnectivity: ConnectivityMonitoring, @unchecked Sendable {
     private var listeners: [UUID: AsyncStream<ConnectivityStatus>.Continuation] = [:]
     private var current: ConnectivityStatus
 
+    /// How many streams are still open.
+    var listenerCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return listeners.count
+    }
+
+    /// How many streams were ever asked for.
+    private(set) var streamsOpened = 0
+
     /// Creates a fake that starts with the given status.
     init(initial: ConnectivityStatus = .online) {
         current = initial
@@ -18,6 +28,7 @@ final class FakeConnectivity: ConnectivityMonitoring, @unchecked Sendable {
         let (stream, continuation) = AsyncStream.makeStream(of: ConnectivityStatus.self)
         lock.lock()
         listeners[id] = continuation
+        streamsOpened += 1
         let snapshot = current
         lock.unlock()
         continuation.yield(snapshot)

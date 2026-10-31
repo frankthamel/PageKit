@@ -19,6 +19,8 @@ public actor Paginator<Source: PageSource> {
         /// The feed's clear epoch from before the request, which every caller persists
         /// with. A caller that joins after a clear must not take the page for a new one.
         let clearEpoch: Int
+        /// How many edits came before the request. Its page predates any after these.
+        let editsBefore: Int
     }
 
     let source: Source
@@ -33,6 +35,9 @@ public actor Paginator<Source: PageSource> {
     var indexByID: [Item.ID: Int] = [:]
     /// The token of every page that makes up `items`, in order.
     var pageOrder: [Token] = []
+    /// The feed's clear epoch from before the list's oldest page was asked for. Once the
+    /// feed has moved past this, the list's pages must stay out of the caches.
+    var listClearEpoch = 0
     /// The token of the following page, or `nil` at the end of the list.
     var nextToken: Token?
     /// The page each item came from.
@@ -67,6 +72,17 @@ public actor Paginator<Source: PageSource> {
     var isOffline = false
     var lastError: PaginationError?
     var startTask: Task<Void, Never>?
+    /// Set once by ``cancel()``, which is final.
+    var isCancelled = false
+    /// Every edit so far, for requests that began before one. Edits are the user's own
+    /// actions, so this stays small.
+    var localEdits: [LocalEdit] = []
+    /// Delivers network status for as long as the paginator lives.
+    var connectivityTask: Task<Void, Never>?
+    /// The latest network status, or `nil` until the first arrives.
+    var connectivityStatus: ConnectivityStatus?
+    /// The work the most recent reconnect started.
+    var reconnectTask: Task<Void, Never>?
     /// The most recent disk write. Each one waits for the one before, so they land in order.
     var pendingWrite: Task<Void, Never>?
     /// The most recent queued deletion of cached pages.
@@ -97,32 +113,48 @@ public actor Paginator<Source: PageSource> {
         environment.memory.raiseCostLimit(to: configuration.memoryCostLimit)
     }
 
+    deinit {
+        connectivityTask?.cancel()
+    }
+
     /// A new stream on every call. It starts with the current snapshot, then delivers
     /// every change, in order. Any number of observers may listen at once.
+    ///
+    /// After ``cancel()`` a new stream delivers the final snapshot and finishes.
     public nonisolated func snapshots() -> AsyncStream<PaginationSnapshot<Source.Item>> {
         broadcaster.stream()
     }
 
     /// Begins loading and returns at once. Results arrive on ``snapshots()``.
     ///
-    /// Calling it again after the feed has opened does nothing.
+    /// Calling it again after the feed has opened, or after ``cancel()``, does nothing.
     public func start() {
-        guard state == .idle, startTask == nil else { return }
+        guard state == .idle, startTask == nil, !isCancelled else { return }
         environment.scheduleMaintenance()
+        if connectivityTask == nil { startListeningForConnectivity() }
         startTask = Task { await open() }
     }
 
-    /// Stops all work under way. A load that was running leaves no trace: the state
-    /// goes back to what it was before the load, and its late result is ignored.
+    /// Stops all work and finishes every ``snapshots()`` stream. A load that was running
+    /// leaves no trace: the state goes back to what it was before the load, and its late
+    /// result is ignored.
+    ///
+    /// This is final. Every later call on this paginator does nothing. Make a new one to
+    /// show the feed again.
     public func cancel() {
+        isCancelled = true
         startTask?.cancel()
         startTask = nil
         prefetchTask?.cancel()
         prefetchTask = nil
+        reconnectTask?.cancel()
+        connectivityTask?.cancel()
         invalidateLoads()
-        guard state.isLoading else { return }
-        state = stateBeforeLoad
-        publish()
+        if state.isLoading {
+            state = stateBeforeLoad
+            publish()
+        }
+        broadcaster.finish()
     }
 
     /// Cancels every request and makes sure no running load or read-ahead can use its result.
@@ -154,6 +186,7 @@ final class SnapshotBroadcaster<Item: Identifiable & Sendable>: @unchecked Senda
     private let lock = NSLock()
     private var current = PaginationSnapshot<Item>.initial
     private var continuations: [UUID: AsyncStream<PaginationSnapshot<Item>>.Continuation] = [:]
+    private var isFinished = false
 
     /// The snapshot most recently published.
     var latest: PaginationSnapshot<Item> { lock.withLock { current } }
@@ -162,14 +195,20 @@ final class SnapshotBroadcaster<Item: Identifiable & Sendable>: @unchecked Senda
     var subscriberCount: Int { lock.withLock { continuations.count } }
 
     /// A stream that starts with the latest snapshot, then delivers every later one.
+    /// Once finished, that first snapshot is also the last.
+    ///
+    /// `onTermination` takes the lock, so `finish()` on a continuation must be called
+    /// outside it, here and in ``finish()``.
     func stream() -> AsyncStream<PaginationSnapshot<Item>> {
         AsyncStream { continuation in
             let id = UUID()
             continuation.onTermination = { [weak self] _ in self?.remove(id) }
-            lock.withLock {
-                continuations[id] = continuation
+            let isOpen = lock.withLock {
                 continuation.yield(current)
+                if !isFinished { continuations[id] = continuation }
+                return !isFinished
             }
+            if !isOpen { continuation.finish() }
         }
     }
 
@@ -179,6 +218,16 @@ final class SnapshotBroadcaster<Item: Identifiable & Sendable>: @unchecked Senda
             current = snapshot
             continuations.values.forEach { $0.yield(snapshot) }
         }
+    }
+
+    /// Ends every stream, and every stream asked for from now on.
+    func finish() {
+        let open = lock.withLock {
+            isFinished = true
+            defer { continuations.removeAll() }
+            return Array(continuations.values)
+        }
+        open.forEach { $0.finish() }
     }
 
     private func remove(_ id: UUID) {
