@@ -44,6 +44,17 @@ import Testing
         }
     }
 
+    @Test func decoderStrategiesSurviveTheFactory() async throws {
+        let decoder = JSONDecoder()
+        decoder.allowsJSON5 = true
+        decoder.assumesTopLevelDictionary = true
+        let stub = StubURLProtocol.stub { StubURLProtocol.ok("data: [{id: 1,},], next: null", for: $0) }
+
+        let page = try await source(session: stub.session, url: stub.url, decoder: decoder).loadPage(first)
+
+        #expect(page.items.map(\.id) == [1])
+    }
+
     @Test func successDecodesAndMaps() async throws {
         let stub = StubURLProtocol.stub {
             StubURLProtocol.ok(#"{"data":[{"id":1,"title":"a"},{"id":2}],"next":"c2"}"#, for: $0)

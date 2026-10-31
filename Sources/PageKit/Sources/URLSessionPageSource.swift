@@ -93,6 +93,8 @@ public struct URLSessionPageSource<
         let data = decoder.dataDecodingStrategy
         let floats = decoder.nonConformingFloatDecodingStrategy
         let keys = decoder.keyDecodingStrategy
+        let allowsJSON5 = decoder.allowsJSON5
+        let assumesTopLevelDictionary = decoder.assumesTopLevelDictionary
         let userInfo = decoder.userInfo
         return {
             let copy = JSONDecoder()
@@ -100,6 +102,8 @@ public struct URLSessionPageSource<
             copy.dataDecodingStrategy = data
             copy.nonConformingFloatDecodingStrategy = floats
             copy.keyDecodingStrategy = keys
+            copy.allowsJSON5 = allowsJSON5
+            copy.assumesTopLevelDictionary = assumesTopLevelDictionary
             copy.userInfo = userInfo
             return copy
         }
