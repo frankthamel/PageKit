@@ -818,6 +818,92 @@ private struct HeldConnectivity: ConnectivityMonitoring {
         #expect(environment.memory.keyCount(for: source.feedID) == 0)
     }
 
+    /// Read 3 is the read-ahead looking for page 3, and the clear lands while it is held.
+    /// With `pageOnDisk`, the read still finds the page, as a read just ahead of a clear would.
+    @Test(arguments: [false, true]) func readAheadStopsAtAClearDuringACacheRead(pageOnDisk: Bool) async {
+        let entered = Gate()
+        let release = Gate()
+        let reads = CallLog()
+        var environment = PaginatorEnvironment.testing()
+        environment.beforeDiskRead = {
+            guard await reads.record() == 3 else { return }
+            await entered.open()
+            await release.wait()
+        }
+        let laterCalls = CallLog()
+        let third = CursorToken(value: "c", size: 2)
+        let fourth = CursorToken(value: "d", size: 2)
+        let source = CursorMockSource { token in
+            switch token.value {
+            case nil: return page(1, next: CursorToken(value: "b", size: 2))
+            case "b": return page(2, next: third)
+            default:
+                await laterCalls.record()
+                return page(9, next: fourth)
+            }
+        }
+        let paginator = paginator(source, lookahead: 3, environment: environment)
+        await paginator.start()
+        await entered.wait()
+
+        await PageKit.clear(feedID: source.feedID, stores: [environment.disk], memory: environment.memory)
+        if pageOnDisk {
+            let found: Page<TestItem, CursorToken> = page(3, next: fourth)
+            await environment.disk.save(found, feedID: source.feedID, token: third, schemaVersion: 1)
+        }
+        await release.open()
+        await paginator.waitForReadAhead()
+        await paginator.waitForPendingWrites()
+
+        #expect(await laterCalls.count == 0)
+        #expect(environment.memory.keyCount(for: source.feedID) == 0)
+        if !pageOnDisk { #expect(await environment.disk.storedFeeds().isEmpty) }
+    }
+
+    /// The walk begins after the clear, so its own epoch is new, but the request it joins
+    /// for page 2 is older. Page 3 starts in the same turn as that join, which proves it.
+    @Test func walkJoiningARequestFromBeforeAClearStopsThere() async {
+        let joined = Gate()
+        let release = Gate()
+        let environment = PaginatorEnvironment.testing()
+        let source = MockSource { token in
+            switch token.page {
+            case 1: return page(1, 2, next: token.next)
+            case 2: await release.wait()
+            default: await joined.open()
+            }
+            return page(token.page * 10, next: token.next)
+        }
+        let paginator = paginator(source, lookahead: 2, environment: environment)
+        await paginator.setAppActive(false)
+        await opened(paginator)
+        _ = await paginator.request(second)
+        await clear(environment)
+
+        await paginator.setAppActive(true)
+        await paginator.scheduleReadAhead()
+        await joined.wait()
+        await release.open()
+        await paginator.waitForReadAhead()
+        await paginator.waitForPendingWrites()
+
+        await expectNotCached(second, in: environment)
+        await expectNotCached(third, in: environment)
+    }
+
+    @Test func cancelBeforeAReadAheadBeginsStopsIt() async {
+        let calls = CallLog()
+        let paginator = paginator(numbered(calls: calls))
+        await paginator.setAppActive(false)
+        await opened(paginator)
+        await paginator.setAppActive(true)
+
+        await paginator.scheduleReadAheadThenCancel()
+
+        #expect(await calls.count == 1)
+        #expect(await paginator.readAheadTask == nil)
+    }
+
     @Test func readAheadRequestedBeforeAClearIsNotCached() async {
         let entered = Gate()
         let release = Gate()
@@ -854,7 +940,8 @@ private struct HeldConnectivity: ConnectivityMonitoring {
 
     // MARK: A load sharing a read-ahead's request
 
-    @Test func cancellingALoadThatJoinedAReadAheadEndsBothCleanly() async {
+    /// Cancellation reaches the load by two routes, and either may land first.
+    @Test func cancellingALoadBesideAReadAheadLeavesTheListCorrect() async {
         let entered = Gate()
         let release = Gate()
         let calls = CallLog()
@@ -886,10 +973,54 @@ private struct HeldConnectivity: ConnectivityMonitoring {
         #expect(await paginator.readAheadTask == nil)
         #expect(await paginator.inFlight.isEmpty)
 
-        // Cancelled before it joined, the load leaves the read-ahead to park page 2.
-        // Cancelled after, a new request fetches it. The list ends up the same.
+        // If `abandonLoad` ran before the load's guards, it cancelled the shared request and
+        // a new one fetches page 2. If the guards saw the cancellation first, they restored
+        // the state, `abandonLoad` did nothing, and the read-ahead parked page 2.
         await paginator.loadNextPage()
 
         #expect(ids(await paginator.current()) == [1, 2, 3, 4])
+    }
+
+    /// Holding the load inside its disk read keeps its guards back, so `abandonLoad` is
+    /// sure to run first and cancel the request the read-ahead is waiting on.
+    @Test func abandoningALoadEndsTheReadAheadsRequest() async {
+        let sourceEntered = Gate(), sourceRelease = Gate()
+        let readEntered = Gate(), readRelease = Gate()
+        let calls = CallLog()
+        let reads = CallLog()
+        var environment = PaginatorEnvironment.testing()
+        // Read 1 finds no manifest, read 2 is the read-ahead, and read 3 is the load.
+        environment.beforeDiskRead = {
+            guard await reads.record() == 3 else { return }
+            await readEntered.open()
+            await readRelease.wait()
+        }
+        let source = MockSource { token in
+            guard token.page == 2 else { return page(1, 2, next: token.next) }
+            await calls.record()
+            await sourceEntered.open()
+            await sourceRelease.wait()
+            try Task.checkCancellation()
+            return page(3, 4)
+        }
+        let paginator = paginator(source, environment: environment)
+        await paginator.start()
+        await sourceEntered.wait()
+        let readAhead = await paginator.readAheadTask
+
+        let load = Task { await paginator.loadNextPage() }
+        await readEntered.wait()
+        load.cancel()
+        let snapshot = await paginator.first { !$0.state.isLoading }
+        await sourceRelease.open()
+        await readAhead?.value
+        await readRelease.open()
+        await load.value
+        await paginator.waitForPendingWrites()
+
+        #expect(snapshot.state == .loaded(hasMore: true))
+        #expect(ids(snapshot) == [1, 2])
+        #expect(await calls.count == 1)
+        await expectNotCached(second, in: environment)
     }
 }

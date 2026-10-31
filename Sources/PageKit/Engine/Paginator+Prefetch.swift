@@ -49,16 +49,19 @@ extension Paginator {
     func scheduleReadAhead() {
         guard canPrefetch, configuration.cachePolicy.readsAhead, configuration.lookaheadPages > 0,
               readAheadTask == nil, let nextToken else { return }
-        readAheadTask = Task { await readAhead(from: nextToken) }
+        readAheadTask = Task { [generation] in await readAhead(from: nextToken, generation: generation) }
     }
 
     /// Follows the chain from `start`, parking up to `lookaheadPages` pages.
     ///
     /// Nothing here touches the list or its state, so a failure just ends the read-ahead.
     /// A page is only parked once the page before it has named its token, so a wrong
-    /// prediction can't put a page outside the chain into the cache.
-    private func readAhead(from start: Token) async {
-        let generation = self.generation
+    /// prediction can't put a page outside the chain into the cache. The walk ends at a
+    /// clear, because a new request would take the new epoch and undo it.
+    /// - Parameter generation: The generation it was scheduled in, so it can be overtaken
+    ///   before it has begun.
+    private func readAhead(from start: Token, generation: Int) async {
+        let clearEpoch = environment.disk.clearEpoch(for: source.feedID)
         defer {
             if generation == self.generation {
                 readAheadTask = nil
@@ -72,7 +75,8 @@ extension Paginator {
         var remaining = configuration.lookaheadPages
         while remaining > 0, let token = next {
             let cached = await readPage(token)
-            guard generation == self.generation, isAppActive else { return }
+            guard generation == self.generation, isAppActive,
+                  clearEpoch == environment.disk.clearEpoch(for: source.feedID) else { return }
             if let cached {
                 next = cached.nextToken
                 remaining -= 1
@@ -86,6 +90,7 @@ extension Paginator {
                 let page = await readAheadPage(from: request)
                 guard let page, token == next, generation == self.generation else { return }
                 persist(page, token: token, clearEpoch: request.clearEpoch)
+                // A joined request can be older than the walk, so this needs its own check.
                 // After a clear the page isn't parked, and following it would park the next.
                 guard request.clearEpoch == environment.disk.clearEpoch(for: source.feedID) else { return }
                 next = page.nextToken

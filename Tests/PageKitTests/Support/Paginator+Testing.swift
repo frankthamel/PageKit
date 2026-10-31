@@ -78,6 +78,14 @@ extension Paginator {
         await task?.value
     }
 
+    /// Schedules a read-ahead and cancels before its task can run, then waits for that task.
+    func scheduleReadAheadThenCancel() async {
+        scheduleReadAhead()
+        let task = readAheadTask
+        cancel()
+        await task?.value
+    }
+
     /// Waits until no read-ahead is running, including any that one leaves to follow it.
     func waitForReadAhead() async {
         while let task = readAheadTask { await task.value }
