@@ -57,9 +57,6 @@ public actor Paginator<Source: PageSource> {
     var readAheadTask: Task<Void, Never>?
     /// Set by ``setAppActive(_:)``. Nothing is prefetched while it is `false`.
     var isAppActive = true
-    /// Whether the newest page added no items. Scrolling cannot move past such a page,
-    /// so the distance trigger leaves it to an explicit ``loadNextPage()``.
-    var newestPageWasBlank = false
 
     var state = PaginationState.idle {
         didSet { if !state.isLoading { stateBeforeLoad = state } }
@@ -133,6 +130,7 @@ public actor Paginator<Source: PageSource> {
         generation += 1
         inFlight.values.forEach { $0.task.cancel() }
         inFlight.removeAll()
+        readAheadTask?.cancel()
         readAheadTask = nil
     }
 

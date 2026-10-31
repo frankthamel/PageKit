@@ -234,8 +234,6 @@ extension Paginator {
     /// Appends the items whose IDs are new. The token is recorded even if none are,
     /// so a page of only duplicates still moves the list forward.
     func append(_ page: Page<Item, Token>, token: Token) {
-        let countBefore = items.count
-        defer { newestPageWasBlank = items.count == countBefore }
         pageOrder.append(token)
         for item in page.items where indexByID[item.id] == nil {
             indexByID[item.id] = items.count

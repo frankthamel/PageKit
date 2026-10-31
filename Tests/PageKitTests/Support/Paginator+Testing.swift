@@ -78,8 +78,8 @@ extension Paginator {
         await task?.value
     }
 
-    /// Waits for the read-ahead under way, if there is one.
+    /// Waits until no read-ahead is running, including any that one leaves to follow it.
     func waitForReadAhead() async {
-        await readAheadTask?.value
+        while let task = readAheadTask { await task.value }
     }
 }

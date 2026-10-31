@@ -39,6 +39,12 @@ extension Paginator {
         isAppActive && state.canLoadMore && !newestPageWasBlank
     }
 
+    /// Whether the newest page shows no items, which scrolling cannot move past. The
+    /// distance trigger leaves such a page to an explicit ``loadNextPage()``.
+    private var newestPageWasBlank: Bool {
+        items.last.flatMap { pageByItem[$0.id] } != pageOrder.last
+    }
+
     /// Starts reading ahead of the list, unless a read-ahead is already running.
     func scheduleReadAhead() {
         guard canPrefetch, configuration.cachePolicy.readsAhead, configuration.lookaheadPages > 0,
@@ -53,7 +59,13 @@ extension Paginator {
     /// prediction can't put a page outside the chain into the cache.
     private func readAhead(from start: Token) async {
         let generation = self.generation
-        defer { if generation == self.generation { readAheadTask = nil } }
+        defer {
+            if generation == self.generation {
+                readAheadTask = nil
+                // A page shown meanwhile found this task still set, so its turn is now.
+                if nextToken != start { scheduleReadAhead() }
+            }
+        }
         guard await networkAllowsReadAhead() else { return }
 
         var next: Token? = start
@@ -71,12 +83,26 @@ extension Paginator {
             let tokens = remaining > 1 ? [token, token.predictedNext].compactMap { $0 } : [token]
             let requests = tokens.map(request)
             for (token, request) in zip(tokens, requests) {
-                let page = try? await request.task.value
+                let page = await readAheadPage(from: request)
                 guard let page, token == next, generation == self.generation else { return }
                 persist(page, token: token, clearEpoch: request.clearEpoch)
+                // After a clear the page isn't parked, and following it would park the next.
+                guard request.clearEpoch == environment.disk.clearEpoch(for: source.feedID) else { return }
                 next = page.nextToken
                 remaining -= 1
             }
+        }
+    }
+
+    /// The page a request brings, or `nil`. Cancellation is expected, so only a real failure is logged.
+    private func readAheadPage(from request: InFlightRequest) async -> Page<Item, Token>? {
+        do {
+            return try await request.task.value
+        } catch {
+            if let failure = ErrorClassifier.classify(error) {
+                PageKitLog.logger.error("Read-ahead failed: \(String(describing: failure))")
+            }
+            return nil
         }
     }
 
