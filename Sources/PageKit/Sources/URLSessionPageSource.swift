@@ -86,14 +86,13 @@ public struct URLSessionPageSource<
 
     /// A factory of decoders configured like `decoder`.
     ///
-    /// `JSONDecoder` is not `Sendable`, so the source keeps the settings and builds a fresh one per load.
+    /// The source keeps the settings and builds a fresh decoder per load, so the caller's decoder can change afterwards without effect.
     private static func decoderFactory(copying decoder: JSONDecoder) -> @Sendable () -> JSONDecoder {
-        nonisolated(unsafe) let template = decoder
-        let dates = template.dateDecodingStrategy
-        let data = template.dataDecodingStrategy
-        let floats = template.nonConformingFloatDecodingStrategy
-        let keys = template.keyDecodingStrategy
-        let userInfo = template.userInfo
+        let dates = decoder.dateDecodingStrategy
+        let data = decoder.dataDecodingStrategy
+        let floats = decoder.nonConformingFloatDecodingStrategy
+        let keys = decoder.keyDecodingStrategy
+        let userInfo = decoder.userInfo
         return {
             let copy = JSONDecoder()
             copy.dateDecodingStrategy = dates
