@@ -44,13 +44,10 @@ public actor Paginator<Source: PageSource> {
     /// Goes up whenever running loads stop counting, so their late results can be dropped.
     ///
     /// Invariant: any path that changes `state` during a load must bump this, or that
-    /// load will overwrite the change when it finishes. Ending just one load retires its
-    /// number in `latestLoad` instead, so revalidation, which is not a load, carries on.
+    /// load will overwrite the change when it finishes. A load that finds this moved
+    /// leaves `state` alone, so every bump must come with a state that isn't left loading.
     /// Read-ahead stops on the same signal, so a page from an old chain is never parked.
     var generation = 0
-    /// Numbers each load. Only the load holding this number may finish, so a late
-    /// cancellation cannot end a newer load.
-    var latestLoad = 0
     /// Requests under way, so that two callers for one page share one request.
     var inFlight: [Token: InFlightRequest] = [:]
     /// What ``retry()`` repeats.
@@ -117,12 +114,14 @@ public actor Paginator<Source: PageSource> {
 
     deinit {
         connectivityTask?.cancel()
+        broadcaster.finish()
     }
 
     /// A new stream on every call. It starts with the current snapshot, then delivers
     /// every change, in order. Any number of observers may listen at once.
     ///
-    /// After ``cancel()`` a new stream delivers the final snapshot and finishes.
+    /// After ``cancel()`` a new stream delivers the final snapshot and finishes. Every
+    /// stream also finishes once the paginator is gone.
     public nonisolated func snapshots() -> AsyncStream<PaginationSnapshot<Source.Item>> {
         broadcaster.stream()
     }

@@ -17,8 +17,8 @@ extension CachePolicy {
 ///
 /// One invariant keeps it simple: every page in the cache belongs to the current chain.
 /// Replacing the list deletes the later pages, so a cached page is always safe to append.
-/// The manifest lists only the pages on screen. A parked page is reached from
-/// `lastNextToken`, one page at a time, as any cached next page is.
+/// The manifest lists only the pages on screen. A parked page is reached from the last
+/// restored page's `nextToken`, one page at a time, as any cached next page is.
 extension Paginator {
     private var feedID: String { source.feedID }
 
@@ -28,7 +28,6 @@ extension Paginator {
     /// would open the feed again. It is not published: observers go straight to the
     /// cached items, or to the first-page load if there are none.
     func openFromCache() async {
-        latestLoad += 1
         state = .loadingFirstPage
         let generation = self.generation
         let restored = await restoreFromCache()
@@ -98,16 +97,15 @@ extension Paginator {
         let token = source.firstToken
         do {
             let fetched = try await fetch(token)
-            guard generation == self.generation, !Task.isCancelled else { return }
+            guard generation == self.generation else { return }
             adoptFirstPage(fetched.page, token: token, clearEpoch: fetched.clearEpoch)
         } catch {
-            guard generation == self.generation, !Task.isCancelled,
-                  let failure = ErrorClassifier.classify(error) else { return }
+            guard generation == self.generation, let failure = ErrorClassifier.classify(error) else { return }
             noteFailure(failure)
             PageKitLog.logger.error("Revalidation failed: \(String(describing: failure), privacy: .private)")
             lastError = failure
             // A next page that failed is what the footer is waiting on, so retry stays with
-            // it, even while it is being retried: a cancelled retry goes back to `.failed`.
+            // it, even while it is being retried: a retry the source cancels goes back to `.failed`.
             if case .failed = stateBeforeLoad {} else { lastFailedOperation = .revalidate }
             publish()
         }

@@ -65,6 +65,15 @@ extension Paginator {
         await retry()
     }
 
+    /// Runs `call` on two tasks on this actor, queued one after the other, so the second
+    /// arrives ahead of any task the first one starts.
+    func onTwoTasks(_ call: @escaping @Sendable (isolated Paginator) async -> Void) async {
+        let first = Task { await call(self) }
+        let second = Task { await call(self) }
+        await first.value
+        await second.value
+    }
+
     /// Reports `id` appearing `times` times, all in one turn of the actor.
     func itemAppeared(id: Source.Item.ID, times: Int) {
         for _ in 0..<times { itemAppeared(id: id) }

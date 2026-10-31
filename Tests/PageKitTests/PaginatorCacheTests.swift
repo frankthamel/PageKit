@@ -370,6 +370,7 @@ import Testing
             if call == attempts + 1 {
                 await retryEntered.open()
                 await retryRelease.wait()
+                throw CancellationError()
             }
             return page(3, 4)
         }
@@ -384,8 +385,6 @@ import Testing
         await firstRelease.open()
         _ = await paginator.first { $0.lastError != nil }
 
-        retrying.cancel()
-        _ = await paginator.first { !$0.state.isLoading }
         await retryRelease.open()
         await retrying.value
 
@@ -432,7 +431,7 @@ import Testing
         #expect(await firstCalls.count == callsSoFar)
     }
 
-    @Test func cancelledNextPageCallerDoesNotStopRevalidation() async {
+    @Test func cancelledNextPageCallerStopsNeitherItsLoadNorRevalidation() async {
         await seedChain(pages: 1)
         let enteredFirst = Gate()
         let releaseFirst = Gate()
@@ -455,13 +454,11 @@ import Testing
         await enteredNext.wait()
 
         next.cancel()
-        _ = await paginator.first { $0.state == .loaded(hasMore: true) }
         await releaseFirst.open()
-        _ = await paginator.revalidated()
         await releaseNext.open()
         await next.value
 
-        #expect(ids(await paginator.current()) == [1, 2])
+        #expect(ids(await paginator.revalidated()) == [1, 2, 3, 4])
     }
 
     @Test func offlineLaunchShowsDiskPages() async {
@@ -1045,25 +1042,6 @@ import Testing
 
         #expect(ids(await paginator.current()) == [8])
         #expect(await paginator.current().state == .loaded(hasMore: false))
-    }
-
-    @Test func lateCancellationDoesNotEndARestore() async {
-        await seedChain(pages: 1)
-        environment.memory.removeAll()
-        let entered = Gate()
-        let release = Gate()
-        let source = firstPageOnly(page(1, 2, next: secondToken))
-        let held = holdingRead(1, entered: entered, release: release)
-        let paginator = Paginator.testing(source, policy: .cacheThenNetwork, environment: held)
-        let earlierLoad = await paginator.latestLoad
-        let generation = await paginator.generation
-
-        await paginator.start()
-        await entered.wait()
-        await paginator.abandonLoad(earlierLoad, generation: generation, token: firstToken)
-        await release.open()
-
-        #expect(ids(await paginator.revalidated()) == [1, 2])
     }
 
     @Test func nextPageBeginsWhileRevalidationRuns() async {

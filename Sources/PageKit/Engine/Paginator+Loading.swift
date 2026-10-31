@@ -16,9 +16,17 @@ enum PageOrigin: Sendable {
 
 extension Paginator {
     /// Loads the next page. Does nothing unless the state is `.loaded(hasMore: true)`.
+    ///
+    /// The load belongs to the paginator. Cancelling the task that called this doesn't
+    /// stop it, and that task stays suspended until the load ends. Only ``cancel()`` and
+    /// ``refresh()`` stop a load.
     public func loadNextPage() async {
-        guard state.canLoadMore else { return }
-        await load(.nextPage)
+        // The check runs in the task, which sets the state in the same turn. Made any
+        // earlier, a second caller could pass it before this load has begun.
+        await Task {
+            guard state.canLoadMore else { return }
+            await load(.nextPage)
+        }.value
     }
 
     /// Reloads from the first page.
@@ -27,21 +35,33 @@ extension Paginator {
     /// state returns to `.loaded`, and the snapshot's `lastError` is set. With no items
     /// to keep, a failure is `.failed(_, isFirstPage: true)` instead.
     ///
-    /// Under ``CachePolicy/cacheOnly`` this does nothing, because that policy never uses
+    /// Before ``start()`` this does nothing, as there is no feed to reload. Under
+    /// ``CachePolicy/cacheOnly`` it also does nothing, because that policy never uses
     /// the network.
+    ///
+    /// The load belongs to the paginator, so a caller that SwiftUI's `.refreshable`
+    /// cancels mid-refresh doesn't stop it. That caller stays suspended until the load
+    /// ends. A newer `refresh()` replaces this one, and ``cancel()`` stops it.
     public func refresh() async {
-        guard configuration.cachePolicy != .cacheOnly else { return }
-        await load(.refresh)
+        await Task {
+            guard configuration.cachePolicy != .cacheOnly, state != .idle else { return }
+            await load(.refresh)
+        }.value
     }
 
     /// Repeats the load that last failed. Does nothing if none has, or while loading.
+    ///
+    /// The load belongs to the paginator. Cancelling the task that called this doesn't
+    /// stop it, and that task stays suspended until the load ends.
     public func retry() async {
-        guard !state.isLoading, !isCancelled, let lastFailedOperation else { return }
-        if lastFailedOperation == .revalidate {
-            await revalidateFirstPage()
-        } else {
-            await load(lastFailedOperation)
-        }
+        await Task {
+            guard !state.isLoading, !isCancelled, let lastFailedOperation else { return }
+            if lastFailedOperation == .revalidate {
+                await revalidateFirstPage()
+            } else {
+                await load(lastFailedOperation)
+            }
+        }.value
     }
 
     /// The first load after `start()`.
@@ -63,12 +83,7 @@ extension Paginator {
     /// Fetches a page through the shared in-flight table, with retries.
     ///
     /// A second caller for the same token shares the first caller's request and its
-    /// clear epoch. Cancelling a caller here does not cancel the request, because others
-    /// may share it.
-    ///
-    /// `load(_:)` adds that for the one caller that owns the list's state, even when it
-    /// is sharing. So cancelling a load that joined a read-ahead ends the read-ahead's
-    /// request too. The read-ahead parks nothing and stops, and the list is unaffected.
+    /// clear epoch.
     func fetch(_ token: Source.Token) async throws -> (page: Page<Source.Item, Source.Token>, clearEpoch: Int) {
         let request = request(token)
         return (try await page(from: request), request.clearEpoch)
@@ -97,30 +112,23 @@ extension Paginator {
 
     /// Runs one load from its loading state through to its final snapshot.
     func load(_ operation: LoadOperation) async {
-        guard !Task.isCancelled, !isCancelled else { return }
+        guard !isCancelled else { return }
         defer { runPendingResume() }
         if operation == .refresh { invalidateLoads() }
         guard let token = operation == .nextPage ? nextToken : source.firstToken else { return }
         state = loadingState(for: operation)
         publish()
 
-        latestLoad += 1
-        let load = latestLoad
         let generation = self.generation
         let result: Result<(page: Page<Item, Token>, origin: PageOrigin), Error>
         do {
-            result = .success(try await withTaskCancellationHandler {
-                try await resolvePage(token, for: operation)
-            } onCancel: { [self] in
-                Task { await abandonLoad(load, generation: generation, token: token) }
-            })
+            result = .success(try await resolvePage(token, for: operation))
         } catch {
             result = .failure(error)
         }
 
         // The world may have changed while waiting. Whoever replaced this load owns the state now.
-        guard generation == self.generation, load == latestLoad else { return }
-        guard !Task.isCancelled else { return restoreState() }
+        guard generation == self.generation else { return }
         switch result {
         case .success(let resolved):
             apply(resolved.page, token: token, operation: operation, origin: resolved.origin)
@@ -129,7 +137,6 @@ extension Paginator {
             noteFailure(failure)
             let recovered = await recoverFromCache(operation, token: token, failure: failure)
             guard generation == self.generation, !recovered else { return }
-            guard !Task.isCancelled else { return restoreState() }
             fail(operation, with: failure)
         }
     }
@@ -146,7 +153,7 @@ extension Paginator {
         }
         let generation = self.generation
         if let cached = await readPage(token) { return (withoutRemovedItems(cached, token: token), .cache) }
-        guard generation == self.generation, !Task.isCancelled else { throw CancellationError() }
+        guard generation == self.generation else { throw CancellationError() }
         guard configuration.cachePolicy != .cacheOnly else {
             return (Page(items: [], nextToken: nil), .cache)
         }
@@ -177,18 +184,6 @@ extension Paginator {
         case .firstPage, .refresh, .revalidate:
             return false
         }
-    }
-
-    /// Ends a load whose caller was cancelled, without waiting for its request.
-    ///
-    /// This arrives by a separate task, so it can land after the load has finished. It
-    /// only acts if `load` is still the load under way, whose result can no longer apply.
-    func abandonLoad(_ load: Int, generation: Int, token: Token) {
-        guard load == latestLoad, generation == self.generation, state.isLoading else { return }
-        inFlight[token]?.task.cancel()
-        inFlight[token] = nil
-        latestLoad += 1
-        restoreState()
     }
 
     private func loadingState(for operation: LoadOperation) -> PaginationState {
@@ -274,7 +269,8 @@ extension Paginator {
         publish()
     }
 
-    /// Ends a cancelled load. Cancellation is not an error, so only the state changes.
+    /// Ends a load whose source reported a cancellation. That is not an error, so only
+    /// the state changes.
     private func restoreState() {
         state = stateBeforeLoad
         publish()

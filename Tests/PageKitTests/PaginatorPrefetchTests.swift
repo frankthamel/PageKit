@@ -976,18 +976,16 @@ private struct HeldConnectivity: ConnectivityMonitoring {
 
     // MARK: A load sharing a read-ahead's request
 
-    /// Cancellation reaches the load by two routes, and either may land first.
-    @Test func cancellingALoadBesideAReadAheadLeavesTheListCorrect() async {
+    @Test func cancelledCallerKeepsTheRequestItSharesWithAReadAhead() async {
         let entered = Gate()
         let release = Gate()
         let calls = CallLog()
         let source = MockSource { token in
             guard token.page == 2 else { return page(1, 2, next: token.next) }
-            if await calls.record() == 1 {
-                await entered.open()
-                await release.wait()
-                try Task.checkCancellation()
-            }
+            await calls.record()
+            await entered.open()
+            await release.wait()
+            try Task.checkCancellation()
             return page(3, 4)
         }
         let paginator = paginator(source)
@@ -998,65 +996,12 @@ private struct HeldConnectivity: ConnectivityMonitoring {
         let load = Task { await paginator.loadNextPage() }
         _ = await paginator.first { $0.state == .loadingNextPage }
         load.cancel()
-        let snapshot = await paginator.first { !$0.state.isLoading }
         await release.open()
         await load.value
         await readAhead?.value
-        await paginator.waitForPendingWrites()
-
-        #expect(snapshot.state == .loaded(hasMore: true))
-        #expect(ids(snapshot) == [1, 2])
-        #expect(await paginator.readAheadTask == nil)
-        #expect(await paginator.inFlight.isEmpty)
-
-        // If `abandonLoad` ran before the load's guards, it cancelled the shared request and
-        // a new one fetches page 2. If the guards saw the cancellation first, they restored
-        // the state, `abandonLoad` did nothing, and the read-ahead parked page 2.
-        await paginator.loadNextPage()
 
         #expect(ids(await paginator.current()) == [1, 2, 3, 4])
-    }
-
-    /// Holding the load inside its disk read keeps its guards back, so `abandonLoad` is
-    /// sure to run first and cancel the request the read-ahead is waiting on.
-    @Test func abandoningALoadEndsTheReadAheadsRequest() async {
-        let sourceEntered = Gate(), sourceRelease = Gate()
-        let readEntered = Gate(), readRelease = Gate()
-        let calls = CallLog()
-        let reads = CallLog()
-        var environment = PaginatorEnvironment.testing()
-        // Read 1 finds no manifest, read 2 is the read-ahead, and read 3 is the load.
-        environment.beforeDiskRead = {
-            guard await reads.record() == 3 else { return }
-            await readEntered.open()
-            await readRelease.wait()
-        }
-        let source = MockSource { token in
-            guard token.page == 2 else { return page(1, 2, next: token.next) }
-            await calls.record()
-            await sourceEntered.open()
-            await sourceRelease.wait()
-            try Task.checkCancellation()
-            return page(3, 4)
-        }
-        let paginator = paginator(source, environment: environment)
-        await paginator.start()
-        await sourceEntered.wait()
-        let readAhead = await paginator.readAheadTask
-
-        let load = Task { await paginator.loadNextPage() }
-        await readEntered.wait()
-        load.cancel()
-        let snapshot = await paginator.first { !$0.state.isLoading }
-        await sourceRelease.open()
-        await readAhead?.value
-        await readRelease.open()
-        await load.value
-        await paginator.waitForPendingWrites()
-
-        #expect(snapshot.state == .loaded(hasMore: true))
-        #expect(ids(snapshot) == [1, 2])
         #expect(await calls.count == 1)
-        await expectNotCached(second, in: environment)
+        #expect(await paginator.inFlight.isEmpty)
     }
 }
