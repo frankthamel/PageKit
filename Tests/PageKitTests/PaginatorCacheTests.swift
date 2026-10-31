@@ -1278,6 +1278,102 @@ import Testing
         #expect(await environment.disk.storedFeeds().isEmpty)
     }
 
+    private func clearFeed() async {
+        await PageKit.clear(feedID: "test", stores: [environment.disk], memory: environment.memory)
+    }
+
+    private func expectFeedIsGone() async {
+        #expect(await environment.disk.storedFeeds().isEmpty)
+        #expect(environment.memory.keyCount(for: "test") == 0)
+        #expect(memoryPage(firstToken) == nil)
+        #expect(memoryPage(secondToken) == nil)
+    }
+
+    @Test func firstPageRequestedBeforeAClearIsNotCached() async {
+        let entered = Gate()
+        let release = Gate()
+        let source = MockSource { [self] _ in
+            await entered.open()
+            await release.wait()
+            return page(1, 2, next: secondToken)
+        }
+        let paginator = Paginator.testing(source, policy: .networkFirst, environment: environment)
+        await paginator.start()
+        await entered.wait()
+
+        await clearFeed()
+        await release.open()
+        let snapshot = await paginator.settled()
+        await paginator.waitForPendingWrites()
+
+        #expect(ids(snapshot) == [1, 2])
+        await expectFeedIsGone()
+    }
+
+    @Test func nextPageRequestedBeforeAClearIsNotCached() async {
+        let entered = Gate()
+        let release = Gate()
+        let source = MockSource { [self] token in
+            guard token.page == 2 else { return page(1, 2, next: secondToken) }
+            await entered.open()
+            await release.wait()
+            return page(3, 4)
+        }
+        let paginator = Paginator.testing(source, policy: .networkFirst, environment: environment)
+        await paginator.start()
+        _ = await paginator.settled()
+        let next = Task { await paginator.loadNextPage() }
+        await entered.wait()
+
+        await clearFeed()
+        await release.open()
+        await next.value
+        await paginator.waitForPendingWrites()
+
+        #expect(ids(await paginator.current()) == [1, 2, 3, 4])
+        await expectFeedIsGone()
+    }
+
+    @Test(arguments: [[1, 2], [7]]) func revalidationRequestedBeforeAClearIsNotCached(fresh: [Int]) async {
+        await seedChain(pages: 1)
+        let entered = Gate()
+        let release = Gate()
+        let source = MockSource { [self] _ in
+            await entered.open()
+            await release.wait()
+            return Page(items: fresh.map { TestItem(id: $0) }, nextToken: secondToken)
+        }
+        let paginator = Paginator.testing(source, policy: .cacheThenNetwork, environment: environment)
+        await paginator.start()
+        await entered.wait()
+
+        await clearFeed()
+        await release.open()
+        let snapshot = await paginator.revalidated()
+        await paginator.waitForPendingWrites()
+
+        #expect(ids(snapshot) == fresh)
+        await expectFeedIsGone()
+    }
+
+    @Test func pageBeingReadDuringAClearIsNotPromoted() async {
+        await seedChain(pages: 1)
+        environment.memory.removeAll()
+        let entered = Gate()
+        let release = Gate()
+        let held = holdingRead(1, entered: entered, release: release)
+        let paginator = Paginator.testing(failing(), policy: .cacheOnly, environment: held)
+
+        let read = Task { await paginator.readPage(firstToken) }
+        await entered.wait()
+        await environment.disk.removeFeed("test")
+        await park(page(1, 2), as: firstToken)
+        await release.open()
+        _ = await read.value
+
+        #expect(memoryPage(firstToken) == nil)
+    }
+
     @Test func writesAfterAClearLand() async {
         let paginator = Paginator.testing(threePages(), policy: .cacheThenNetwork, environment: environment)
         await paginator.start()

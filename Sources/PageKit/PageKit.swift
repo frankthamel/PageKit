@@ -35,14 +35,17 @@ public enum PageKit {
 
     // MARK: Internal overloads, for tests
 
+    // Disk goes first in both clears. Removing it stops late pages reaching memory, so
+    // emptying memory afterwards leaves nothing that could come back.
+
     static func clear(feedID: String, stores: [DiskPageStore], memory: MemoryPageCache) async {
-        memory.removeFeed(feedID)
         for store in stores { await store.removeFeed(feedID) }
+        memory.removeFeed(feedID)
     }
 
     static func clearAll(stores: [DiskPageStore], memory: MemoryPageCache) async {
-        memory.removeAll()
         for store in stores { await store.removeAll() }
+        memory.removeAll()
     }
 
     static func clearMemoryCache(_ memory: MemoryPageCache) {

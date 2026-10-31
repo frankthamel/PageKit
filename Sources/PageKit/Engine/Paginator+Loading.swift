@@ -8,7 +8,9 @@ enum LoadOperation: Sendable {
 
 /// Where a load's page came from. Only a page from the network has anything to save.
 enum PageOrigin: Sendable {
-    case network
+    /// `clearEpoch` is the feed's epoch from before the request, so a page asked for
+    /// before a clear is never cached after it.
+    case network(clearEpoch: Int)
     case cache
 }
 
@@ -122,7 +124,7 @@ extension Paginator {
         _ token: Token, for operation: LoadOperation
     ) async throws -> (page: Page<Item, Token>, origin: PageOrigin) {
         guard operation == .nextPage, configuration.cachePolicy.readsCacheFirst else {
-            return (try await fetch(token), .network)
+            return try await fetchFromNetwork(token)
         }
         let generation = self.generation
         if let cached = await readPage(token) { return (cached, .cache) }
@@ -130,7 +132,12 @@ extension Paginator {
         guard configuration.cachePolicy != .cacheOnly else {
             return (Page(items: [], nextToken: nil), .cache)
         }
-        return (try await fetch(token), .network)
+        return try await fetchFromNetwork(token)
+    }
+
+    private func fetchFromNetwork(_ token: Token) async throws -> (page: Page<Item, Token>, origin: PageOrigin) {
+        let clearEpoch = environment.disk.clearEpoch(for: source.feedID)
+        return (try await fetch(token), .network(clearEpoch: clearEpoch))
     }
 
     /// Under `.networkFirst`, shows what the cache holds after a failed load.
@@ -185,10 +192,15 @@ extension Paginator {
         }
         append(page, token: token)
         nextToken = page.nextToken
-        if origin == .network { persist(page, token: token) }
+        switch origin {
+        case .network(let clearEpoch):
+            persist(page, token: token, clearEpoch: clearEpoch)
+            lastFailedOperation = nil
+        case .cache:
+            // A cached page says nothing about the network, so a failed revalidation still stands.
+            if lastFailedOperation != .revalidate { lastFailedOperation = nil }
+        }
         lastError = nil
-        // A cached page says nothing about the network, so a failed revalidation still stands.
-        if origin == .network || lastFailedOperation != .revalidate { lastFailedOperation = nil }
         state = settledState
         publish()
     }

@@ -88,10 +88,11 @@ extension Paginator {
     func revalidateFirstPage() async {
         let generation = self.generation
         let token = source.firstToken
+        let clearEpoch = environment.disk.clearEpoch(for: feedID)
         do {
             let page = try await fetch(token)
             guard generation == self.generation, !Task.isCancelled else { return }
-            adoptFirstPage(page, token: token)
+            adoptFirstPage(page, token: token, clearEpoch: clearEpoch)
         } catch {
             guard generation == self.generation, !Task.isCancelled,
                   let failure = ErrorClassifier.classify(error) else { return }
@@ -105,17 +106,17 @@ extension Paginator {
 
     /// Takes in a fresh page 1: in place if it still leads into the same chain, otherwise
     /// as a new list.
-    private func adoptFirstPage(_ page: Page<Item, Token>, token: Token) {
+    private func adoptFirstPage(_ page: Page<Item, Token>, token: Token, clearEpoch: Int) {
         let following = pageOrder.count > 1 ? pageOrder[1] : nextToken
         guard hasSameItems(page, token: token), page.nextToken == following else {
             // A next page still loading belongs to the old chain.
             invalidateLoads()
-            return apply(page, token: token, operation: .refresh, origin: .network)
+            return apply(page, token: token, operation: .refresh, origin: .network(clearEpoch: clearEpoch))
         }
         for item in page.items {
             if let index = indexByID[item.id] { items[index] = item }
         }
-        persist(page, token: token)
+        persist(page, token: token, clearEpoch: clearEpoch)
         isStale = false
         lastError = nil
         if lastFailedOperation == .revalidate { lastFailedOperation = nil }
@@ -140,21 +141,27 @@ extension Paginator {
         if let page = environment.memory.page(for: key, as: Page<Item, Token>.self) { return page }
 
         let generation = self.generation
+        let clearEpoch = environment.disk.clearEpoch(for: feedID)
         await environment.beforeDiskRead()
         let page: Page<Item, Token>? = await environment.disk.page(
             feedID: feedID, token: token, schemaVersion: configuration.schemaVersion
         )
         guard let page, generation == self.generation else { return nil }
-        environment.memory.store(page, for: key, cost: cost(of: page))
+        if clearEpoch == environment.disk.clearEpoch(for: feedID) {
+            environment.memory.store(page, for: key, cost: cost(of: page))
+        }
         return page
     }
 
     /// Stores a page in memory and queues it for disk, with a manifest of the list as it is now.
     ///
     /// Page and manifest go together, so maintenance never finds a feed without a manifest.
-    /// The write is dropped if the feed is cleared before it lands.
-    func persist(_ page: Page<Item, Token>, token: Token) {
-        guard configuration.cachePolicy.usesCache else { return }
+    /// - Parameter clearEpoch: The feed's epoch from before the page was requested. If the
+    ///   feed has been cleared since, the page stays out of both caches, even if the clear
+    ///   comes after this call but before the write lands.
+    func persist(_ page: Page<Item, Token>, token: Token, clearEpoch: Int) {
+        guard configuration.cachePolicy.usesCache,
+              clearEpoch == environment.disk.clearEpoch(for: feedID) else { return }
         environment.memory.store(page, for: PageKey(feedID: feedID, token: token), cost: cost(of: page))
         let manifest = FeedManifest(
             schemaVersion: configuration.schemaVersion,
@@ -165,7 +172,6 @@ extension Paginator {
             diskSizeLimit: configuration.diskSizeLimit,
             storage: configuration.storage
         )
-        let clearEpoch = environment.disk.clearEpoch(for: feedID)
         enqueueDiskWrite { [feedID, schemaVersion = configuration.schemaVersion] disk in
             await disk.save(
                 page, manifest: manifest, feedID: feedID, token: token,

@@ -126,9 +126,9 @@ actor DiskPageStore {
     /// two. The page goes first: a crash between them leaves a feed with no manifest,
     /// which is swept, rather than a manifest that promises a page it does not have.
     ///
-    /// `clearEpoch` is the feed's ``clearEpoch(for:)`` from when the write was queued. If
-    /// the feed has been cleared since, nothing is written, so a queued write cannot bring
-    /// back data that the app was told is gone.
+    /// `clearEpoch` is the feed's ``clearEpoch(for:)`` from before the page was requested. If
+    /// the feed has been cleared since, nothing is written, so neither a queued write nor
+    /// a request in flight can bring back data that the app was told is gone.
     func save<Item: Codable & Sendable, Token: PageToken>(
         _ page: Page<Item, Token>, manifest: FeedManifest<Token>, feedID: String, token: Token,
         schemaVersion: Int, clearEpoch: Int
@@ -179,8 +179,8 @@ actor DiskPageStore {
 
     /// A number that changes whenever `feedID` is cleared.
     ///
-    /// It is `nonisolated` so that a paginator can note it at the moment it queues a
-    /// write, without waiting for this actor.
+    /// It is `nonisolated` so that a paginator can note it just before a request, and
+    /// check it again before caching the result, without waiting for this actor.
     nonisolated func clearEpoch(for feedID: String) -> Int {
         clearEpochs.value(for: feedID)
     }
