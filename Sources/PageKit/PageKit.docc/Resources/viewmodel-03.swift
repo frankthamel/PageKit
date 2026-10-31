@@ -27,6 +27,6 @@ final class RecipesViewModel {
     }
 
     func refresh() async {
-        await Task { [paginator] in await paginator.refresh() }.value
+        await paginator.refresh()
     }
 }

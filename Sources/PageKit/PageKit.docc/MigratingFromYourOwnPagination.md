@@ -31,7 +31,7 @@ Store the whole snapshot in one property, and read everything from it. Separate 
 
 ### Step 4: Watch for these changes in behaviour
 
-- **Cancelling a caller aborts its load.** SwiftUI's `.refreshable` can cancel its task when the view re-renders, so call ``Paginator/refresh()`` from a task that outlives a re-render, such as `await Task { await paginator.refresh() }.value`.
+- **Loads belong to the paginator.** Cancelling the task that awaits ``Paginator/refresh()`` doesn't stop the load, so SwiftUI's `.refreshable` needs no workaround. Only ``Paginator/cancel()`` and a newer refresh stop a load.
 - **A failed refresh keeps the list.** The state returns to `.loaded`, and the error is in ``PaginationSnapshot/lastError``. Show it quietly rather than as a full-screen error.
 - **Tell the server before you edit the list.** Call ``Paginator/remove(id:)`` and ``Paginator/update(_:)`` after the server confirms, because a page requested afterwards is believed.
 - **Cached items can show first.** Read ``PaginationSnapshot/isStale`` if the user needs to know. Use ``CachePolicy/networkOnly`` where they must never see old data.

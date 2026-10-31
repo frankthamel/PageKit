@@ -182,6 +182,9 @@ The states:
 
 The examples below call an `APIClient`. That's your own type. It just needs to be `Sendable`.
 
+> [!NOTE]
+> In a project with `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, the default for new app projects in Xcode 26, mark your `PageSource` and item types `nonisolated`. Otherwise they are isolated to the main actor, and can't conform to what PageKit needs off it.
+
 **Page numbers.** The client works out the next token, and ends the list when the server says so.
 
 ```swift
@@ -284,10 +287,10 @@ final class FeedViewModel<Source: PageSource> {
         }
     }
 
-    /// Runs in its own task, which `.refreshable` can't cancel. See the note below.
-    func refresh() async {
-        await Task { [paginator] in await paginator.refresh() }.value
-    }
+    func refresh() async { await paginator.refresh() }
+
+    /// For a "Load more" button. Scrolling loads pages by itself.
+    func loadMore() { Task { await paginator.loadNextPage() } }
 
     func itemAppeared(_ item: Source.Item) {
         let id = item.id
@@ -302,9 +305,6 @@ final class FeedViewModel<Source: PageSource> {
     func updateLocally(_ item: Source.Item) async { await paginator.update(item) }
 }
 ```
-
-> [!IMPORTANT]
-> **Cancelling a caller aborts its load.** If the task awaiting `refresh()`, `loadNextPage()` or `retry()` is cancelled, the load stops and the list goes back to its earlier state. SwiftUI's `.refreshable` can cancel its task when the view re-renders, and a refresh is exactly what causes a re-render. So call `refresh()` from a task that outlives a re-render, as `refresh()` above does. Awaiting that task's `.value` keeps the spinner up until the load ends, and the cancellation never reaches it.
 
 **On iOS 15 and 16,** `@Observable` isn't available, so make the same class an `ObservableObject`:
 
@@ -342,7 +342,7 @@ struct ProductGridView: View {
                         .onAppear { model.itemAppeared(product) }   // drives prefetching
                 }
             }
-            PageFooter(state: model.snapshot.state, retry: model.retry)
+            PageFooter(state: model.snapshot.state, retry: model.retry, loadMore: model.loadMore)
         }
         .overlay { FirstPageOverlay(state: model.snapshot.state, retry: model.retry) }
         .safeAreaInset(edge: .top) { if model.snapshot.isOffline { OfflineBanner() } }
@@ -356,6 +356,7 @@ struct ProductGridView: View {
 struct PageFooter: View {
     let state: PaginationState
     let retry: () -> Void
+    let loadMore: () -> Void
 
     var body: some View {
         switch state {
@@ -363,6 +364,8 @@ struct PageFooter: View {
             ProgressView().frame(maxWidth: .infinity).padding()
         case .failed(_, isFirstPage: false):
             Button("Couldn't load more. Tap to retry.", action: retry).padding()
+        case .loaded(hasMore: true):
+            Button("Load more", action: loadMore).padding()
         case .loaded(hasMore: false):
             Text("You're all caught up").foregroundStyle(.secondary).padding()
         default:
@@ -480,7 +483,7 @@ The same two app-side types cover every case. Only the source and the configurat
 | Live data | Prices, stock levels, bids | Either | `.networkOnly` | Defaults |
 | Filtered or GraphQL lists | Orders by status, Relay connection | Custom `PageToken` | `.cacheThenNetwork` | Filter inside the token |
 
-**Search.** Each query is its own feed, so results for "shoes" never mix with "boots", and going back to "shoes" is served from cache. The view model swaps paginators and debounces typing.
+**Search.** Each query is its own feed, so results for "shoes" never mix with "boots". Going back to "shoes" asks the network first, and shows the saved results if that fails. The view model swaps paginators and debounces typing, and cancels the last one when it goes away.
 
 ```swift
 struct SearchSource: PageSource {
@@ -501,33 +504,40 @@ struct SearchSource: PageSource {
 @MainActor @Observable
 final class SearchViewModel {
     private(set) var snapshot = PaginationSnapshot<Product>.initial
-    private var paginator: Paginator<SearchSource>?
-    private var searchTask: Task<Void, Never>?
+    @ObservationIgnored private var paginator: Paginator<SearchSource>?
+    @ObservationIgnored private var searchTask: Task<Void, Never>?
     private let api: APIClient
 
     init(api: APIClient) {
         self.api = api
     }
 
+    deinit {
+        searchTask?.cancel()                                     // ends the loop below
+        let paginator = paginator
+        Task { await paginator?.cancel() }
+    }
+
     func queryChanged(_ text: String) {
         searchTask?.cancel()
-        searchTask = Task {
+        searchTask = Task { [weak self, api] in                  // weak, or the loop keeps self alive
             try? await Task.sleep(nanoseconds: 300_000_000)      // debounce typing
             guard !Task.isCancelled else { return }
-            await paginator?.cancel()                            // stop the previous query
             var config = PaginationConfiguration()
             config.cachePolicy = .networkFirst
             config.maxAge = 60 * 60                              // search results go stale fast
             let next = Paginator(source: SearchSource(api: api, query: text), configuration: config)
-            paginator = next
+            let previous = self?.paginator
+            self?.paginator = next
+            await previous?.cancel()                             // stop the previous query
             await next.start()
-            for await snapshot in next.snapshots() { self.snapshot = snapshot }
+            for await snapshot in next.snapshots() { self?.snapshot = snapshot }
         }
     }
 }
 ```
 
-**Offline-first reading list.** The screen reads `snapshot.isOffline` to show a banner, and `snapshot.isStale` to show a quiet "Updating…" label.
+**Offline-first reading list.** The screen reads `snapshot.isOffline` to show a banner, and `snapshot.isStale` to show a quiet "Saved copy" label.
 
 ```swift
 struct SavedArticlesSource: PageSource {
@@ -572,7 +582,7 @@ Under `.cacheThenNetwork`, if page 1 from the network still leads into the same 
 A feed works offline with no extra code. Pages are kept on disk as you load them, and the next launch opens from them.
 
 - **`isOffline` is a label.** PageKit never holds a request back because of it, since a device's network status can be wrong. Read it to show a banner.
-- **Reconnecting is automatic.** When the connection returns, PageKit quietly refreshes a one-page list and retries whatever failed. Longer lists stay as they are, because a refresh could shrink them under the user's thumb, and `isStale` stays `true` until the next `refresh()`.
+- **Reconnecting is automatic.** When the connection returns, PageKit quietly refreshes a one-page list and retries a first page or next page that failed. Longer lists stay as they are, because a refresh could shrink them under the user's thumb. So a failed `refresh()` on a longer list isn't repeated, and `isStale` stays `true` until the next `refresh()`.
 - **Tell it when the app is in the background** with `setAppActive(_:)` from `scenePhase`, as the [SwiftUI screen](#swiftui-screen) does. A reconnect that happens in the background is picked up on return.
 
 **Where pages live.** `configuration.storage` picks the folder.
@@ -601,7 +611,7 @@ There are two levels, and together they mean the user rarely sees a spinner.
 - It stops in the background, and needs a known online status.
 - Tokens that can predict their successor (`predictedNext`), such as `IndexToken`, fetch up to two pages in parallel. Cursor feeds fetch one at a time, since each cursor arrives with the page before it.
 
-**A page with no items but a next token.** A server can send this, and PageKit won't spin on it. The state is `.loaded(hasMore: true)` and nothing loads by itself, because nothing on screen leads to the next page. To move past it, call `loadNextPage()`, for example from a "Load more" button.
+**A page with no items but a next token.** A server can send this, and PageKit won't spin on it. The state is `.loaded(hasMore: true)`, and scrolling won't load past it, because nothing on screen leads to the next page. PageKit moves past such a page by itself only when a restore, an edit or a return to the foreground finds it. Otherwise call `loadNextPage()`, as the "Load more" button in `PageFooter` does.
 
 ## Editing items
 
@@ -664,18 +674,18 @@ Every failure is sorted into a `PaginationError`, so the engine knows whether to
 | --- | --- | --- |
 | `.offline` | `URLError` for no connection or a lost one | No, the list resumes on reconnect |
 | `.timedOut` | `URLError.timedOut` | Yes |
-| `.rateLimited(retryAfter:)` | HTTP 429 | Yes, waiting as long as the server asked |
+| `.rateLimited(retryAfter:)` | HTTP 429 | Yes, waiting as long as the server asked. If that's longer than `maxDelay`, it stops at once and the failure is reported, so the UI can offer Retry. With no `Retry-After`, it uses the usual backoff. |
 | `.server(status:)` | HTTP 5xx | Yes |
 | `.client(status:)` | Other HTTP 4xx | No |
 | `.decoding(underlying:)` | `DecodingError` | No |
 | `.other(underlying:)` | Anything else | No |
 
-Retries use backoff with jitter, as set by `retry`. Cancellation isn't an error: a cancelled load just returns the list to its earlier state.
+Retries use backoff with jitter, as set by `retry`. Cancellation isn't an error: a load stopped by `cancel()`, or by a source that throws `CancellationError`, just returns the list to its earlier state.
 
 Failures reach the UI in one of two ways:
 
 - **In `state`,** when the failure is what the list is waiting on: `.failed(error, isFirstPage: true)` with nothing on screen, or `.failed(error, isFirstPage: false)` for a next page. Call `retry()`, which repeats the failed load.
-- **In `lastError`,** when the items on screen are still good: a failed `refresh()`, a failed check of cached items, or a `.networkFirst` feed showing its cache. The state stays `.loaded`, the list stays usable, and the next success clears it. Show something quiet:
+- **In `lastError`,** when the items on screen are still good: a failed `refresh()`, a failed check of cached items, or a `.networkFirst` feed showing its cache because page 1 failed. A `.networkFirst` next page served from the cache sets `isStale` instead, with no error. The state stays `.loaded`, the list stays usable, and the next success clears it. Show something quiet:
 
 ```swift
 import PageKit
@@ -727,7 +737,7 @@ func makeConfiguration() -> PaginationConfiguration {
 | --- | --- | --- |
 | `maxAttempts` | `3` | Tries in total, including the first. |
 | `baseDelay` | 0.5 s | The wait before the first retry. It doubles each time. |
-| `maxDelay` | 8 s | The longest wait between tries. |
+| `maxDelay` | 8 s | The longest wait between tries. A server asking for longer ends the retries. |
 
 These values are fixed:
 
@@ -748,7 +758,7 @@ These values are fixed:
 | `snapshots()` | A new stream on every call, with no `await` needed. It starts with the current snapshot, then delivers every change. Any number of observers may listen. |
 | `start()` | Begins loading and returns at once. Calling it again does nothing. |
 | `loadNextPage()` | Loads the next page, if the state is `.loaded(hasMore: true)`. |
-| `refresh()` | Reloads from page 1. On success the new page replaces the list. On failure every item stays. |
+| `refresh()` | Reloads from page 1. On success the new page replaces the list. On failure every item stays. Does nothing before `start()`. |
 | `retry()` | Repeats the load that last failed. |
 | `itemAppeared(id:)` | Tells the paginator a cell came on screen. |
 | `prefetch(upToIndex:)` | The same, by index, for UIKit. |
@@ -762,7 +772,7 @@ These values are fixed:
 
 - **Two callers for one page share one request.** A second caller joins the first caller's request.
 - **Stale results are dropped.** After every `await` the paginator re-checks that its work still counts, so a late response can't overwrite a newer list.
-- **Cancelling a caller aborts its load,** as [described above](#a-reusable-view-model). `start()` isn't affected, as it runs in its own task, and neither is a cancelled `.task` loop over `snapshots()`.
+- **Loads belong to the paginator.** Cancelling the task awaiting `refresh()`, `loadNextPage()` or `retry()` doesn't stop the load, so `.refreshable` can't abort a refresh when the view re-renders. That task stays suspended until the load ends. Only `cancel()` and a newer `refresh()` stop a load, and a request that isn't stopped runs to the end.
 
 A scroll stays smooth when the main thread finishes each frame in under 8 ms at 120 Hz, or 16 ms at 60 Hz. PageKit has no UI, so smoothness is a shared contract.
 
@@ -857,7 +867,7 @@ flowchart TD
 
 Loads go memory, then disk, then network, as the cache policy allows. Every load runs through one state machine, and the list only ever changes by one published snapshot.
 
-PageKit includes a privacy manifest. It reads file dates for eviction, collects no data and does no tracking. It follows [semantic versioning](https://semver.org), and CI checks for accidental API breaks against the last tag.
+PageKit includes a privacy manifest. It reads file attributes to measure the size of the cache, collects no data and does no tracking. Which feeds are oldest comes from the time saved in each feed's manifest. It follows [semantic versioning](https://semver.org), and CI checks for accidental API breaks against the last tag.
 
 ## The name `PageKit`
 

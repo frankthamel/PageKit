@@ -17,7 +17,8 @@ The first release.
 - Prefetching by distance from the end of the list, and read-ahead that parks pages in the cache.
 - Local edits with `remove(id:)` and `update(_:)`, which reach the list and both caches.
 - `PageKit.clear(feedID:)`, `clearAll()`, `clearMemoryCache()` and `performMaintenance()`.
-- Automatic retries with backoff and jitter, and `Retry-After` support.
+- Automatic retries with backoff and jitter, and `Retry-After` support. A wait longer than `maxDelay` ends the retries and reports `.rateLimited`.
+- Loads that belong to the paginator: cancelling a caller doesn't stop its load. Only `cancel()` and a newer `refresh()` do.
 - Signposts for Instruments, and a privacy manifest.
 - DocC articles and a tutorial.
 
