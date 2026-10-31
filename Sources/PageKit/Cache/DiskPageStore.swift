@@ -14,7 +14,7 @@ actor DiskPageStore {
     private static let manifestFileName = "manifest.json"
     private static let maxFolderNameBytes = 200
     private static let allowedFolderCharacters = CharacterSet(
-        charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_"
+        charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789.-_"
     )
 
     private static let sharedLock = NSLock()
@@ -51,7 +51,10 @@ actor DiskPageStore {
 
     /// A folder name that is legal on disk and unique for the feed ID.
     ///
-    /// Everything except letters, digits, `.`, `-` and `_` is percent-encoded.
+    /// Everything except lowercase letters, digits, `.`, `-` and `_` is
+    /// percent-encoded, so IDs that differ only by case stay distinct on
+    /// case-insensitive filesystems. A literal `%` is encoded as `%25`, so a raw
+    /// `%` only ever starts an uppercase-hex escape and escapes cannot collide.
     /// Names over 200 bytes are cut short and prefixed with a hash of the whole
     /// ID, so two long IDs that share a start still differ.
     nonisolated static func folderName(for feedID: String) -> String {
@@ -176,13 +179,18 @@ actor DiskPageStore {
     }
 
     /// Creates the root and keeps it out of backups: cached server data should not use the user's iCloud quota.
+    /// The exclusion is checked on every write, so a failed attempt is retried.
     private func prepareRoot() throws {
-        guard !fileManager.fileExists(atPath: root.path) else { return }
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        var rootURL = root
+        if (try? rootURL.resourceValues(forKeys: [.isExcludedFromBackupKey]))?.isExcludedFromBackup == true { return }
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
-        var rootURL = root
-        try rootURL.setResourceValues(values)
+        do {
+            try rootURL.setResourceValues(values)
+        } catch {
+            PageKitLog.logger.error("Backup exclusion failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Atomic, so a crash never leaves half a file. On devices the file is also

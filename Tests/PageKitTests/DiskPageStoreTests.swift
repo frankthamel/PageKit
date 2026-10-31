@@ -3,10 +3,12 @@ import Foundation
 import Testing
 @testable import PageKit
 
-struct DiskPageStoreTests {
+final class DiskPageStoreTests {
     private typealias TestPage = Page<TestItem, CursorToken>
 
     private let root: URL
+
+    deinit { try? FileManager.default.removeItem(at: root) }
 
     init() {
         root = FileManager.default.temporaryDirectory
@@ -122,10 +124,16 @@ struct DiskPageStoreTests {
 
         let folders = Set(feeds.map { DiskPageStore.folderName(for: $0) })
         #expect(folders.count == 3)
+        #expect(Set(folders.map { $0.lowercased() }).count == folders.count)
         #expect(Set(files(in: root)) == folders)
         for feed in feeds {
             #expect(!DiskPageStore.folderName(for: feed).contains("/"))
         }
+    }
+
+    @Test func feedNamesDifferingOnlyByCaseStayDistinct() {
+        let folders = ["Search.A", "search.a"].map { DiskPageStore.folderName(for: $0) }
+        #expect(Set(folders.map { $0.lowercased() }).count == 2)
     }
 
     @Test func longFeedNamesAreShortenedAndStayDistinct() {
