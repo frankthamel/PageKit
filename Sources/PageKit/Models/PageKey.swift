@@ -14,4 +14,8 @@ struct PageKey: Hashable, Sendable {
         self.token = (try? encoder.encode(token)).map { String(decoding: $0, as: UTF8.self) }
             ?? String(describing: token)
     }
+
+    /// The key as NSCache wants it: the feed and token joined by a separator
+    /// that cannot appear in the token's JSON.
+    var nsKey: NSString { "\(feedID)\u{1F}\(token)" as NSString }
 }
