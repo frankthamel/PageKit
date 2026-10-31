@@ -6,15 +6,18 @@ import Foundation
 /// at any moment, so a miss here falls through to disk and then the network.
 ///
 /// `@unchecked Sendable` is safe because NSCache is internally synchronised
-/// and `keys` and `limit` are only touched while holding `lock`.
+/// and `keys` is only touched while holding `lock`. `lock` also makes
+/// the check-then-set in `raiseCostLimit` atomic.
 final class MemoryPageCache: NSObject, NSCacheDelegate, @unchecked Sendable {
     /// The cache every paginator uses unless it is given another.
     static let shared = MemoryPageCache(costLimit: 20 * 1024 * 1024)
 
     private let cache = NSCache<NSString, AnyObject>()
     private let lock = NSLock()
-    /// feedID -> keys, so one feed can be cleared. NSCache cannot list its keys.
-    private var keys: [String: Set<NSString>] = [:]
+    /// feedID -> key -> identity of the entry currently stored under that key.
+    /// NSCache cannot list its keys. The identity lets the eviction callback tell
+    /// a replaced entry (same key, old object) from the current one.
+    private var keys: [String: [NSString: ObjectIdentifier]] = [:]
 
     /// Creates a cache.
     /// - Parameters:
@@ -53,14 +56,15 @@ final class MemoryPageCache: NSObject, NSCacheDelegate, @unchecked Sendable {
     ///   - cost: Its size in bytes, usually the length of its encoded JSON.
     func store<Item: Sendable, Token: PageToken>(_ page: Page<Item, Token>, for key: PageKey, cost: Int) {
         // Index first, so an immediate eviction of this entry cleans up after itself.
-        lock.withLock { _ = keys[key.feedID, default: []].insert(key.nsKey) }
-        cache.setObject(CachedPage(page: page, key: key), forKey: key.nsKey, cost: cost)
+        let entry = CachedPage(page: page, key: key)
+        lock.withLock { keys[key.feedID, default: [:]][key.nsKey] = ObjectIdentifier(entry) }
+        cache.setObject(entry, forKey: key.nsKey, cost: cost)
     }
 
     /// Drops every cached page of one feed.
     func removeFeed(_ feedID: String) {
-        let feedKeys = lock.withLock { keys.removeValue(forKey: feedID) ?? [] }
-        feedKeys.forEach { cache.removeObject(forKey: $0) }
+        let feedKeys = lock.withLock { keys.removeValue(forKey: feedID) ?? [:] }
+        feedKeys.keys.forEach { cache.removeObject(forKey: $0) }
     }
 
     /// Drops every cached page of every feed.
@@ -77,6 +81,10 @@ final class MemoryPageCache: NSObject, NSCacheDelegate, @unchecked Sendable {
     // Called by NSCache when it evicts on its own (memory pressure, limits).
     func cache(_ cache: NSCache<AnyObject, AnyObject>, willEvictObject obj: Any) {
         guard let evicted = obj as? CachedEntry else { return }
-        lock.withLock { _ = keys[evicted.feedID]?.remove(evicted.key) }
+        // A replaced entry shares its key with the new one, so only the current entry may clear it.
+        lock.withLock {
+            guard keys[evicted.feedID]?[evicted.key] == ObjectIdentifier(evicted) else { return }
+            keys[evicted.feedID]?[evicted.key] = nil
+        }
     }
 }

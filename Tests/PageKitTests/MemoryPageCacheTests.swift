@@ -66,6 +66,16 @@ struct MemoryPageCacheTests {
         #expect(cache.keyCount(for: "a") == 1)
     }
 
+    @Test func restoringSameKeyKeepsItInTheIndex() {
+        let cache = MemoryPageCache(costLimit: 1_000_000)
+        cache.store(makePage(1), for: key("a"), cost: 10)
+        cache.store(makePage(2), for: key("a"), cost: 10)
+
+        #expect(cache.keyCount(for: "a") == 1)
+        cache.removeFeed("a")
+        #expect(cache.page(for: key("a"), as: TestPage.self) == nil)
+    }
+
     @Test func costLimitOnlyRises() {
         let cache = MemoryPageCache(costLimit: 100)
         cache.raiseCostLimit(to: 500)
