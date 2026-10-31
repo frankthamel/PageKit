@@ -27,4 +27,12 @@ public enum PaginationState: Equatable, Sendable {
 
     /// The only state from which a next-page load may start.
     var canLoadMore: Bool { self == .loaded(hasMore: true) }
+
+    /// Whether a load is under way.
+    var isLoading: Bool {
+        switch self {
+        case .loadingFirstPage, .loadingNextPage, .refreshing: true
+        case .idle, .loaded, .empty, .failed: false
+        }
+    }
 }
